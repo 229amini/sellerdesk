@@ -32,7 +32,7 @@ class BadRequest(Exception):
         self.status = status
 
 
-def make_handler(engine, token: str, market=None, ledger=None):
+def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "SellerDesk"
         timeout = REQUEST_TIMEOUT
@@ -93,7 +93,7 @@ def make_handler(engine, token: str, market=None, ledger=None):
         def _path(self) -> str:
             return self.path.split("?")[0]
 
-        def _body(self) -> dict:
+        def _raw(self) -> bytes:
             # http.server can't read a chunked body; reading it as empty once turned a PUT into a delete.
             if self.headers.get("Transfer-Encoding"):
                 self.close_connection = True
@@ -118,6 +118,10 @@ def make_handler(engine, token: str, market=None, ledger=None):
                 raise BadRequest(408, "the body took too long") from None
             if len(raw) < length:
                 raise BadRequest(400, "the body ended early")
+            return raw
+
+        def _body(self) -> dict:
+            raw = self._raw()
             if not raw.strip():
                 return {}
             try:
@@ -158,6 +162,9 @@ def make_handler(engine, token: str, market=None, ledger=None):
             self._send(200, target.read_bytes(), content_type)
 
         def do_POST(self):
+            if self._path == "/api/g2g/webhook":
+                self._g2g_webhook()
+                return
             if not self._may_change():
                 return
             path = self._path
@@ -204,6 +211,19 @@ def make_handler(engine, token: str, market=None, ledger=None):
             else:
                 self._send(404, b'{"error":"not found"}')
 
+        def _g2g_webhook(self):
+            """G2G signs with its own secret, so this route skips the dashboard token."""
+            if g2g is None:
+                self._error(404, "not found")
+                return
+            try:
+                raw = self._raw()
+            except BadRequest as error:
+                self._error(error.status, str(error))
+                return
+            status = g2g.receive(self.headers.get("g2g-signature", ""), self.headers.get("g2g-timestamp", ""), raw)
+            self._send(status, b'{"ok":true}' if status == 200 else b'{"error":"refused"}')
+
         def _ledger(self, change, body=True):
             """Run one ledger change and answer with the stored object plus the new revision."""
             if not self._shared():
@@ -232,8 +252,8 @@ def make_handler(engine, token: str, market=None, ledger=None):
     return Handler
 
 
-def start(engine, host: str, port: int, token: str, market=None, ledger=None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(engine, token, market, ledger))
+def start(engine, host: str, port: int, token: str, market=None, ledger=None, g2g=None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), make_handler(engine, token, market, ledger, g2g))
     threading.Thread(target=server.serve_forever, daemon=True, name="dashboard").start()
     if not token:
         log.warning("DASHBOARD_TOKEN is empty: keep port %s bound to localhost; the market and finance API "

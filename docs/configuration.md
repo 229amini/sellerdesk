@@ -53,6 +53,17 @@ Going offline doesn't cancel or deliver the order that triggered it.
 | `MARKET_FILE` | `market.json` next to `STATE_FILE` | Where the market hub keeps what it has seen |
 | `LEDGER_FILE` | `ledger.json` next to `STATE_FILE` | Where the finance ledger is kept |
 
+## G2G webhooks (optional)
+
+Set all three and SellerDesk accepts G2G's webhooks at `/api/g2g/webhook`. It checks each signature and keeps the events in `G2G_FILE`. Nothing else uses them yet.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `G2G_USER_ID` | | Your numeric G2G user ID |
+| `G2G_WEBHOOK_SECRET` | | The webhook secret token from G2G's API Integration page |
+| `G2G_WEBHOOK_URL` | | The callback URL exactly as you typed it on G2G, with `https://`. G2G signs with it |
+| `G2G_FILE` | `g2g-events.jsonl` next to `STATE_FILE` | Where the events are kept |
+
 ## Channels
 
 | Variable | Used by |

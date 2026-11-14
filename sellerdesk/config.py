@@ -50,6 +50,11 @@ class Settings:
     market_file: str = "/data/market.json"
     ledger_file: str = "/data/ledger.json"
 
+    g2g_user_id: str = ""
+    g2g_webhook_secret: str = ""
+    g2g_webhook_url: str = ""          # exactly as typed on G2G's API Integration page; it is part of the signature
+    g2g_file: str = "/data/g2g-events.jsonl"
+
     @classmethod
     def from_env(cls, env=None) -> "Settings":
         env = os.environ if env is None else env
@@ -90,4 +95,8 @@ class Settings:
             market_sweep_minutes=int(get("MARKET_SWEEP_MINUTES", "30")),
             market_file=get("MARKET_FILE") or os.path.join(os.path.dirname(state_file), "market.json"),
             ledger_file=get("LEDGER_FILE") or os.path.join(os.path.dirname(state_file), "ledger.json"),
+            g2g_user_id=get("G2G_USER_ID"),
+            g2g_webhook_secret=get("G2G_WEBHOOK_SECRET"),
+            g2g_webhook_url=get("G2G_WEBHOOK_URL"),
+            g2g_file=get("G2G_FILE") or os.path.join(os.path.dirname(state_file), "g2g-events.jsonl"),
         )

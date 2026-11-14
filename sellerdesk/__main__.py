@@ -13,6 +13,7 @@ from .config import Settings
 from .demo import SCENES, ConsoleChannel, DemoApi
 from .eldorado import EldoradoClient
 from .engine import Engine, load_state, save_state
+from .g2g import G2GInbox
 from .ledger import Ledger
 from .market import MarketApi, MarketHub
 
@@ -38,9 +39,12 @@ def run(settings: Settings) -> None:
         hub.start()
     ledger = Ledger(settings.ledger_file)
     ledger.start_sync(market_api.sales_csv)
+    g2g = None
+    if settings.g2g_webhook_secret and settings.g2g_webhook_url and settings.g2g_user_id:
+        g2g = G2GInbox(settings.g2g_file, settings.g2g_webhook_url, settings.g2g_user_id, settings.g2g_webhook_secret)
     if settings.dashboard_port:
         dashboard.start(engine, settings.dashboard_host, settings.dashboard_port, settings.dashboard_token,
-                        market=hub, ledger=ledger)
+                        market=hub, ledger=ledger, g2g=g2g)
     engine.run(save=lambda state: save_state(settings.state_file, state))
 
 

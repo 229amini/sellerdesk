@@ -10,3 +10,4 @@ desktop/SellerDesk/bin/
 desktop/SellerDesk/obj/
 .impeccable/
 *.egg-info/
+.secrets/
