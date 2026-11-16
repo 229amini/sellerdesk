@@ -22,6 +22,16 @@ class FakeEngine:
     def go_online(self):
         pass
 
+    prefs = {"paused": False, "off": ["news"]}
+
+    def alert_prefs(self):
+        return dict(self.prefs)
+
+    def set_alert_prefs(self, raw):
+        from sellerdesk.engine import clean_prefs
+        self.prefs = clean_prefs(raw)
+        return dict(self.prefs)
+
 
 class FakeHub:
     def snapshot(self):
@@ -66,6 +76,14 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(self.call("DELETE", "/api/ledger/payments/x", token="")[0], 401)
         self.assertEqual(self.call("GET", "/healthz", token="")[0], 200)
         self.assertEqual(self.call("PUT", "/api/ledger/nothing", {})[0], 404)
+
+    def test_alert_switches(self):
+        self.assertEqual(self.call("GET", "/api/alerts", token="")[0], 401)
+        self.assertEqual(self.call("PUT", "/api/alerts", {"paused": True}, manager=False)[0], 401)
+        status, reply = self.call("PUT", "/api/alerts", {"paused": True, "off": ["boosting"]})
+        self.assertEqual((status, reply), (200, {"paused": True, "off": ["boosting"]}))
+        self.assertEqual(self.call("GET", "/api/alerts")[1]["off"], ["boosting"])
+        self.assertEqual(self.call("PUT", "/api/alerts", {"off": ["nope"]})[0], 400)
 
     def test_market(self):
         status, reply = self.call("GET", "/api/market")

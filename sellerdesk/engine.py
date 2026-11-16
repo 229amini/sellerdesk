@@ -18,6 +18,43 @@ log = logging.getLogger("sellerdesk")
 
 # The order polls already cover these two, so the notification feed skips them.
 COVERED_EVENTS = {"OrderCreated", "OrderDisputed"}
+# The kinds of alert a person can switch on or off, and the ones that start off.
+ALERT_KINDS = ("order", "deadline", "dispute", "boosting", "news", "connection", "other")
+DEFAULT_OFF = ("boosting", "news", "connection", "other")
+# Channels that forward to another alert app, which has its own switches, get every alert.
+FORWARDERS = {"webhook"}
+
+
+def alert_kind(alert: Alert) -> str | None:
+    """Which switchable kind an alert is. None for the one alert that must always get through: SellerDesk
+    took the account offline, which only the person can undo."""
+    if alert.kind == "order":
+        return "order" if (alert.headline or alert.title).startswith("New order") else "deadline"
+    if alert.kind == "dispute":
+        return "dispute"
+    if alert.kind == "system":
+        return None if alert.title == "SellerDesk took you offline" else "connection"
+    event = alert.event or ""
+    if "Dispute" in event:
+        return "dispute"
+    if event == "Custom":
+        return "news"
+    if event.startswith("Boosting"):
+        return "boosting"
+    return "other"
+
+
+def clean_prefs(raw) -> dict:
+    """The alert switches as the desktop app sends them. Raises ValueError with a message for the app."""
+    if not isinstance(raw, dict):
+        raise ValueError("send a JSON object")
+    paused = raw.get("paused", False)
+    off = raw.get("off", list(DEFAULT_OFF))
+    if not isinstance(paused, bool):
+        raise ValueError("paused must be true or false")
+    if not isinstance(off, list) or any(kind not in ALERT_KINDS for kind in off):
+        raise ValueError("off must list kinds from: " + ", ".join(ALERT_KINDS))
+    return {"paused": paused, "off": sorted(set(off))}
 SALES_REFRESH_SECONDS = 300
 DAY = 86400
 
@@ -68,6 +105,21 @@ class Engine:
         self.commands.put(("online", ""))
         self.wake.set()
 
+    def alert_prefs(self) -> dict:
+        """Which alerts reach the person: all of SellerDesk on or off, and each kind on or off."""
+        prefs = self.state.get("alert_prefs") or {"paused": False, "off": list(DEFAULT_OFF)}
+        return {**prefs, "kinds": list(ALERT_KINDS)}
+
+    def set_alert_prefs(self, raw) -> dict:
+        prefs = clean_prefs(raw)
+        self.commands.put(("prefs", prefs))     # the poll thread owns the state
+        self.wake.set()
+        return {**prefs, "kinds": list(ALERT_KINDS)}
+
+    def _wanted(self, kind: str | None) -> bool:
+        prefs = self.alert_prefs()
+        return not prefs["paused"] and kind not in prefs["off"]
+
     # ---- one poll ----
 
     def tick(self) -> None:
@@ -93,6 +145,8 @@ class Engine:
                 self.api.switch_online()
                 self.state["deadman_tripped"] = False
                 self._dispatch(Alert("system", 3, "You are online", "SellerDesk switched you back online."))
+            elif command == "prefs":
+                self.state["alert_prefs"] = value
 
     def _take_acks(self):
         for channel in self.channels:
@@ -176,7 +230,8 @@ class Engine:
             seen.add(notice.id)
             # The first poll records the backlog without pushing it to your phone.
             if not first_run and notice.event not in COVERED_EVENTS:
-                self._dispatch(Alert("notice", 3, notice.title, notice.text or notice.event, notice.url))
+                self._dispatch(Alert("notice", 3, notice.title, notice.text or notice.event, notice.url,
+                                     event=notice.event))
         self.state["notices"] = sorted(seen)[-2000:]
 
     def _watch_sales(self, now):
@@ -195,6 +250,9 @@ class Engine:
     def _deadman(self, now):
         settings = self.settings
         if not settings.deadman_enabled or self.state.get("deadman_tripped"):
+            return
+        # With order alarms switched off nobody is asked to answer, so silence must not take the account offline.
+        if not self._wanted("order") and not self._wanted("deadline"):
             return
         limit = settings.deadman_minutes * 60
         ignored = [a for a in self.state["alarms"].values()
@@ -216,10 +274,13 @@ class Engine:
                 log.warning("%s close failed: %s", channel.name, error)
 
     def _dispatch(self, alert: Alert):
-        self.recent = [{"at": self.clock(), "title": alert.title, "body": alert.body, "kind": alert.kind}] \
-            + self.recent[:29]
+        wanted = self._wanted(alert_kind(alert))
+        self.recent = [{"at": self.clock(), "title": alert.title, "body": alert.body, "kind": alert.kind,
+                        "muted": not wanted}] + self.recent[:29]
         for channel in self.channels:
             if alert.repeat and not channel.wants_repeats:
+                continue
+            if not wanted and channel.name not in FORWARDERS:
                 continue
             try:
                 channel.send(alert)

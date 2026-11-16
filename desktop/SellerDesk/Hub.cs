@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -72,6 +73,12 @@ namespace SellerDesk
         /// <summary>What one sold unit of the offer costs you; null forgets it.</summary>
         public Dictionary<string, object> SetCost(string offerId, double? cost, string title) =>
             Call("PUT", "/api/ledger/costs/" + Uri.EscapeDataString(offerId), new Dictionary<string, object> { ["cost"] = cost, ["title"] = title });
+
+        /// <summary>Which alerts the server sends: all of them on or off, and the kinds switched off.</summary>
+        public Dictionary<string, object> AlertSwitches() => Call("GET", "/api/alerts", null);
+
+        public Dictionary<string, object> SetAlertSwitches(bool paused, IEnumerable<string> off) =>
+            Call("PUT", "/api/alerts", new Dictionary<string, object> { ["paused"] = paused, ["off"] = off.ToArray() });
 
         public Dictionary<string, object> SetBuyerNote(string buyer, string note) =>
             Call("PUT", "/api/ledger/buyers/" + Uri.EscapeDataString(buyer), new Dictionary<string, object> { ["note"] = note });

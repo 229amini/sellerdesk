@@ -136,6 +136,11 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
             path = self._path
             if path == "/healthz":
                 self._send(200, b'{"ok":true}')
+            elif path == "/api/alerts":
+                if self._authorized():
+                    self._json(200, engine.alert_prefs())
+                else:
+                    self._send(401, b'{"error":"token required"}')
             elif path in ("/api/state", "/api/market", "/api/ledger"):
                 if path != "/api/state" and not self._shared():
                     return
@@ -191,7 +196,14 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
             order = re.fullmatch(r"/api/ledger/orders/([\w-]+)", self._path)
             cost = re.fullmatch(r"/api/ledger/costs/([\w-]+)", self._path)
             buyer = re.fullmatch(r"/api/ledger/buyers/([^/]+)", self._path)
-            if person:
+            if self._path == "/api/alerts":
+                try:
+                    self._json(200, engine.set_alert_prefs(self._body()))
+                except ValueError as error:
+                    self._error(400, str(error))
+                except BadRequest as error:
+                    self._error(error.status, str(error))
+            elif person:
                 self._ledger(lambda body: ledger.update_person(person.group(1), body, self._expect()))
             elif order:
                 self._ledger(lambda body: ledger.put_order(order.group(1), body, self._expect()))

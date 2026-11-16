@@ -4,7 +4,7 @@ from sellerdesk.channels import Alert, Channel
 from sellerdesk.config import Settings
 from sellerdesk.deadline import Stage, parse_time, repeat_interval, stage_for
 from sellerdesk.eldorado import Notice, Order
-from sellerdesk.engine import Engine
+from sellerdesk.engine import DEFAULT_OFF, Engine, alert_kind, clean_prefs
 
 
 class FakeClock:
@@ -184,6 +184,7 @@ class Delivery(Harness):
         self.assertEqual(self.channel.titles, ["Order disputed"])
 
     def test_notices_skip_backlog_and_covered_events(self):
+        self.engine.state["alert_prefs"] = {"paused": False, "off": []}    # announcements start off
         self.api.notices = [Notice("n1", "Custom", "Old", "", None)]
         self.engine.tick()
         self.assertEqual(self.channel.sent, [])
@@ -232,3 +233,62 @@ class Snapshot(Harness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Switches(Harness):
+    """The person turns all SellerDesk alerts off, or some kinds of them."""
+
+    def notice(self, event, title, notice_id):
+        self.api.notices.append(Notice(notice_id, event, title, "", None))
+
+    def test_alerts_fall_into_kinds(self):
+        cases = [(Alert("order", 5, "New order: 19m left", "", headline="New order"), "order"),
+                 (Alert("order", 5, "Deadline close: 3m left", "", headline="Deadline close"), "deadline"),
+                 (Alert("dispute", 4, "Order disputed", ""), "dispute"),
+                 (Alert("notice", 3, "x", "", event="OrderReceivedByAdminAfterDispute"), "dispute"),
+                 (Alert("notice", 3, "x", "", event="BoostingRequestCreated"), "boosting"),
+                 (Alert("notice", 3, "New game added", "", event="Custom"), "news"),
+                 (Alert("notice", 3, "x", "", event="BuyerContactedSeller"), "other"),
+                 (Alert("system", 5, "SellerDesk can't reach Eldorado", ""), "connection"),
+                 (Alert("system", 5, "SellerDesk took you offline", ""), None)]
+        for alert, kind in cases:
+            self.assertEqual(alert_kind(alert), kind, alert.title)
+
+    def test_noisy_kinds_start_off_and_can_be_switched_on(self):
+        self.assertEqual(self.engine.alert_prefs()["off"], list(DEFAULT_OFF))
+        self.engine.tick()
+        self.notice("BoostingRequestCreated", "BoostingRequestCreated", "b1")
+        self.advance(30)
+        self.assertEqual(self.channel.sent, [])
+        self.assertTrue(self.engine.recent[0]["muted"])
+        self.engine.set_alert_prefs({"paused": False, "off": []})
+        self.notice("BoostingRequestCreated", "BoostingRequestCreated", "b2")
+        self.advance(30)
+        self.assertEqual(self.channel.titles, ["BoostingRequestCreated"])
+
+    def test_paused_sends_nothing_but_a_forwarder_still_gets_everything(self):
+        class Forward(Recorder):
+            name = "webhook"
+        forward = Forward()
+        self.engine = self.build(self.channel, forward)
+        self.engine.set_alert_prefs({"paused": True, "off": []})
+        self.api.paid = [order(self.clock)]
+        self.engine.tick()
+        self.assertEqual(self.channel.sent, [])
+        self.assertEqual(len(forward.sent), 1)
+
+    def test_prefs_are_checked(self):
+        for bad in ([], {"paused": "yes"}, {"off": ["nope"]}, {"off": "order"}):
+            with self.assertRaises(ValueError):
+                clean_prefs(bad)
+        self.assertEqual(clean_prefs({"off": ["news", "news"]}), {"paused": False, "off": ["news"]})
+
+
+class DeadManSwitchedOff(Harness):
+    def test_silence_with_order_alarms_off_never_takes_you_offline(self):
+        self.engine = self.build(deadman_enabled=True, deadman_minutes=10)
+        self.engine.set_alert_prefs({"off": ["order", "deadline"]})
+        self.api.paid = [order(self.clock, window=86400)]
+        self.engine.tick()
+        self.advance(3600)
+        self.assertEqual(self.api.offline_calls, 0)

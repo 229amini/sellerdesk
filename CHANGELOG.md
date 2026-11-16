@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.0
+
+- Settings has a new **Alerts** tab. Turn all SellerDesk alerts off, or pick the kinds you want: new order, deadline, dispute, boosting, Eldorado news, connection and other events.
+- Boosting requests, Eldorado news, connection notes and other events start off. Turn them back on in the Alerts tab.
+- The server keeps your choice, so your phone, chat apps and every PC follow it. The server needs 1.9.0 too.
+- Your own alert server (`WEBHOOK_URL`) still gets every alert. Each message now names its kind in `category`.
+- "SellerDesk took you offline" always reaches you.
+
 ## 1.8.1
 
 - Errors now show in a row under the tabs instead of in the top bar. A long error no longer pushes Customers, Finance and Insights out of reach.

@@ -44,6 +44,8 @@ After that, the alarm starts each time you sign in. Open the dashboard from the 
 
 **Shared server**, at the bottom of the Eldorado key tab. If you run the SellerDesk server, enter its API address and its `DASHBOARD_TOKEN`. Your server then reads the market once for all your PCs, and the **Finance** tab keeps one ledger they all share. Leave it empty and each PC reads the market itself, which can run into Eldorado's rate limit once two or three PCs are open. [Deployment](deployment.md#share-the-api-with-the-windows-app) shows how to publish the API.
 
+**Alerts**, once the shared server is set. Turn all SellerDesk alerts off, or pick the kinds that reach you: new order, deadline, dispute, boosting, Eldorado news, connection and other events. Your server keeps the choice for your phone, chat apps and every PC. [Configuration](configuration.md#alert-switches) lists what each kind covers.
+
 ## Answer an alarm
 
 Click **Got it**, or close the window. Both tell every device you saw it. Tapping **Got it** on your phone closes the window on your PC.

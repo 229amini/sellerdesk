@@ -120,14 +120,14 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <Style x:Key="Choice" TargetType="RadioButton">
+        <Style x:Key="Choice" TargetType="ToggleButton">
             <Setter Property="Foreground" Value="{DynamicResource SkinInk}" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="FontWeight" Value="Bold" />
             <Setter Property="Margin" Value="0,0,8,0" />
             <Setter Property="Template">
                 <Setter.Value>
-                    <ControlTemplate TargetType="RadioButton">
+                    <ControlTemplate TargetType="ToggleButton">
                         <Border x:Name="Face" CornerRadius="{DynamicResource SkinCorner}" Background="{DynamicResource SkinField}"
                                 BorderBrush="{DynamicResource SkinFieldLine}" BorderThickness="1" Padding="6,9">
                             <ContentPresenter HorizontalAlignment="Center" />
@@ -203,6 +203,7 @@
                 <RadioButton x:Name="GeneralTab" Style="{StaticResource Tab}" Content="Look and sound" Checked="PartChanged" />
                 <RadioButton x:Name="AlarmTab" Style="{StaticResource Tab}" Content="Alarm server" Checked="PartChanged" />
                 <RadioButton x:Name="KeyTab" Style="{StaticResource Tab}" Content="Eldorado key" Checked="PartChanged" />
+                <RadioButton x:Name="AlertsTab" Style="{StaticResource Tab}" Content="Alerts" Checked="PartChanged" />
             </StackPanel>
 
             <!-- The parts share one cell and hide rather than collapse, so the window keeps its height between tabs. -->
@@ -262,6 +263,17 @@
                         <TextBlock Style="{StaticResource RowLabel}" Text="Server token" />
                         <PasswordBox x:Name="HubTokenBox" />
                     </DockPanel>
+                </StackPanel>
+
+                <StackPanel x:Name="AlertsPart">
+                    <TextBlock x:Name="AlertsHint" Style="{StaticResource Hint}" Text="What your SellerDesk server sends to your phone, chat apps and every PC. An alert server you forward to with WEBHOOK_URL still gets everything; it has its own switches." />
+                    <TextBlock Text="SellerDesk alerts" Foreground="{DynamicResource SkinLabel}" Margin="0,0,0,6" />
+                    <UniformGrid x:Name="AlertsSwitch" Rows="1" Margin="0,0,-8,14">
+                        <RadioButton x:Name="AlertsOn" Style="{StaticResource Choice}" GroupName="alerts" Content="On" Checked="AlertsChanged" />
+                        <RadioButton x:Name="AlertsOff" Style="{StaticResource Choice}" GroupName="alerts" Content="Off: send nothing" Checked="AlertsChanged" />
+                    </UniformGrid>
+                    <TextBlock x:Name="KindsLabel" Text="Which alerts come through" Foreground="{DynamicResource SkinLabel}" Margin="0,0,0,6" />
+                    <UniformGrid x:Name="Kinds" Columns="4" Margin="0,0,-8,0" />
                 </StackPanel>
             </Grid>
 

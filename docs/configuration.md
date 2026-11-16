@@ -76,6 +76,27 @@ Set all three and SellerDesk accepts G2G's webhooks at `/api/g2g/webhook`. It ch
 
 [Channels](channels.md) shows where to get each value.
 
+## Alert switches
+
+You pick which alerts the server sends in the desktop app: **Settings**, **Alerts**. The server keeps your choice, so every PC and channel follows it. The tab needs the shared server address and token under **Eldorado key**.
+
+| Kind | Starts | Covers |
+|---|---|---|
+| `order` | on | A new order |
+| `deadline` | on | Deadline close, order late |
+| `dispute` | on | A dispute opens, admin messages about it |
+| `boosting` | off | Boosting requests |
+| `news` | off | Announcements Eldorado writes, such as new games |
+| `connection` | off | SellerDesk can't reach Eldorado, or reaches it again |
+| `other` | off | Buyer messages, reviews and other Eldorado events |
+
+**Off** sends nothing at all. SellerDesk drops what you switch off; it doesn't send it later. Two exceptions:
+
+- `WEBHOOK_URL` gets every alert, because your own alert server has its own switches. Each message carries `category` and, for a notification, Eldorado's `event`.
+- "SellerDesk took you offline" always goes out, since only you can switch back online. With `order` and `deadline` both off, the dead-man switch stays quiet too.
+
+Scripts can read and set the switches at `GET` and `PUT /api/alerts` with `{"paused": false, "off": ["boosting"]}`. A `PUT` needs the token and the `X-Manager: 1` header.
+
 ## Docker build
 
 | Variable | Default | Meaning |

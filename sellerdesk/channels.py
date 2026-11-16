@@ -30,6 +30,7 @@ class Alert:
     deadline: float | None = None   # Unix seconds, for the Windows countdown
     window: float | None = None     # delivery window in seconds
     headline: str | None = None     # the title without the time left, which goes stale
+    event: str | None = None        # the Eldorado notification event a notice came from
 
 
 class Channel:
@@ -186,6 +187,12 @@ class Webhook(Channel):
                    "deadline": alert.deadline, "window": alert.window, "level": alert.level,
                    "style": "call" if alert.level >= 4 else "notify",
                    "ring": alert.kind == "order" and alert.headline != "New order"}
+        from .engine import alert_kind     # the alert server sorts alerts with the same names
+        kind = alert_kind(alert)
+        if kind:
+            message["category"] = kind
+        if alert.event:
+            message["event"] = alert.event
         self.transport("POST", self.url, headers=self.headers, json_body=message)
 
     def closed(self, order_id):

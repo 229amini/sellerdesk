@@ -49,6 +49,12 @@ namespace SellerDesk
                     settings.UpdateLayout();
                     Save(settings, Path.Combine(folder, "settings-" + part + ".png"), null, 48);
                 }
+                form.PreviewAlerts(false, new[] { "boosting", "news", "connection", "other" });
+                form.Open("alerts");
+                settings.Measure(new Size(620, double.PositiveInfinity));
+                settings.Arrange(new Rect(new Size(620, settings.DesiredSize.Height)));
+                settings.UpdateLayout();
+                Save(settings, Path.Combine(folder, "settings-alerts.png"), null, 48);
             }
         }
 
