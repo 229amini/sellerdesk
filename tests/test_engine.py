@@ -3,7 +3,7 @@ import unittest
 from sellerdesk.channels import Alert, Channel
 from sellerdesk.config import Settings
 from sellerdesk.deadline import Stage, parse_time, repeat_interval, stage_for
-from sellerdesk.eldorado import Notice, Order, format_request
+from sellerdesk.eldorado import Notice, Order, format_details, format_request
 from sellerdesk.engine import DEFAULT_OFF, Engine, alert_kind, clean_prefs
 
 
@@ -20,6 +20,11 @@ class FakeApi:
         self.paid, self.disputed, self.notices = [], [], []
         self.offline_calls = 0
         self.requests, self.request_lookups = {}, []
+        self.details, self.detail_reads = {}, []
+
+    def request_details(self, request_id):
+        self.detail_reads.append(request_id)
+        return self.details.get(request_id, "")
 
     def find_requests(self, request_ids):
         self.request_lookups.append(list(request_ids))
@@ -340,6 +345,32 @@ class RequestOrders(Harness):
         texts = [a.body for a in self.channel.sent]
         self.assertTrue(any("Custom Request | 4 Snap hook | PlayStation" in t for t in texts))
         self.assertTrue(any(t.startswith("Custom Request, ") for t in texts))
+
+    def test_format_details_skips_completion_method(self):
+        values = [{"label": "Current level", "value": "1"}, {"label": "Desired level", "value": "75"},
+                  {"label": "Platform", "value": "PC"}, {"label": "Completion Method", "value": "Solo"},
+                  {"label": "Provide any additional information", "value": "10 turbine"}]
+        self.assertEqual(format_details(values), "1 → 75 | 10 turbine | PC")
+
+    def test_details_page_beats_the_notice(self):
+        # The notice has only the fields Eldorado puts in notifications; the details page has the extra note.
+        self.api.notices = [request_notice("n1", "q5", ["1", "75", "PC"], "Power Leveling")]
+        self.api.details = {"q5": "1 → 75 | 10 turbine | PC"}
+        self.engine.tick()
+        self.api.paid = [request_order(self.clock, "q5")]
+        self.advance(5)
+        self.advance(60)
+        self.assertEqual(self.api.detail_reads, ["q5"])   # read once, then kept
+        self.assertIn("Custom Request | 1 → 75 | 10 turbine | PC", self.channel.sent[-1].body)
+
+    def test_failed_details_fall_back_to_the_notice(self):
+        self.api.notices = [request_notice("n1", "q6", ["PC", "100 herbals"])]
+        self.api.request_details = lambda request_id: (_ for _ in ()).throw(OSError("down"))
+        self.engine.tick()
+        self.api.paid = [request_order(self.clock, "q6")]
+        self.advance(5)
+        self.assertNotIn("q6", self.engine.state["requests_full"])   # asked again next time
+        self.assertIn("Custom Request | 100 herbals | PC", self.channel.sent[-1].body)
 
     def test_failed_lookup_is_retried_later(self):
         self.api.paid = [request_order(self.clock, "q4")]

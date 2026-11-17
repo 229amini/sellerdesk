@@ -133,10 +133,11 @@ namespace SellerDesk
             foreach (var raw in shares ?? new object[0])
             {
                 if (!(raw is IDictionary share)) continue;
-                var units = Convert.ToInt32(share["units"], CultureInfo.InvariantCulture);
-                if (units > 0) list.Add(new Dictionary<string, object> { ["person"] = Convert.ToString(share["person"], CultureInfo.InvariantCulture), ["units"] = units });
+                // A part of a unit is fine (half of a one-unit custom order); six places, like the ledger keeps.
+                var units = Math.Round(Convert.ToDouble(share["units"], CultureInfo.InvariantCulture), 6);
+                if (units > 0 && !double.IsInfinity(units)) list.Add(new Dictionary<string, object> { ["person"] = Convert.ToString(share["person"], CultureInfo.InvariantCulture), ["units"] = units });
             }
-            if (list.Sum(s => (int)s["units"]) > order.Quantity)
+            if (list.Sum(s => (double)s["units"]) > order.Quantity + 1e-9)
             {
                 Told($"This order has {order.Quantity} units, so the shares can't add up to more.");
                 return;
@@ -239,7 +240,7 @@ namespace SellerDesk
                     Header = { "Date", "Item", "Buyer", "Units", "Of", "Order total", "Order net", "Their share", "Net is", "Order id" },
                     Widths = { 17, 34, 16, 7, 6, 12, 12, 12, 10, 38 },
                 };
-                var units = 0;
+                var units = 0.0;
                 var earned = 0.0;
                 foreach (var entry in ledgerOrders.OrderBy(e => Str(e.Value, "placed")))
                 {
@@ -248,7 +249,7 @@ namespace SellerDesk
                     if (placed == null || placed < from || placed >= until) continue;
                     foreach (var share in Items(o, "shares").Where(s => Str(s, "person") == id))
                     {
-                        var mine = (int)Num(share, "units");
+                        var mine = Num(share, "units");
                         var quantity = Math.Max(1, (int)Num(o, "quantity"));
                         var part = Math.Round(Num(o, "net") * mine / quantity, 2);
                         units += mine;
@@ -256,12 +257,12 @@ namespace SellerDesk
                         sheet.Rows.Add(new object[]
                         {
                             placed.Value, Str(o, "title"), orders.TryGetValue(entry.Key, out var known) ? known.Buyer : "",
-                            mine, quantity, Num(o, "total"), Num(o, "net"), part,
+                            Units(mine), quantity, Num(o, "total"), Num(o, "net"), part,
                             Str(o, "netExact") == "True" ? "Exact" : "Estimated", entry.Key,
                         });
                     }
                 }
-                sheet.Rows.Add(new object[] { "Total", "", "", units, null, null, null, new Xlsx.Total(Math.Round(earned, 2)) });
+                sheet.Rows.Add(new object[] { "Total", "", "", Units(units), null, null, null, new Xlsx.Total(Math.Round(earned, 2)) });
                 sheet.Rows.Add(new object[0]);
                 sheet.Rows.Add(new object[] { "Payments" });
                 var paid = 0.0;
@@ -275,9 +276,16 @@ namespace SellerDesk
                 sheet.Rows.Add(new object[] { "Total paid", "", "", null, null, null, null, new Xlsx.Total(Math.Round(paid, 2)) });
                 sheet.Rows.Add(new object[] { "Balance today", "", "", null, null, null, null, new Xlsx.Total(balances.TryGetValue(id, out var left) ? left : 0) });
                 sheets.Add(sheet);
-                summary.Rows.Add(new object[] { Str(person, "name"), units, Math.Round(earned, 2), Math.Round(paid, 2), balances.TryGetValue(id, out var b) ? b : 0, Str(person, "note") });
+                summary.Rows.Add(new object[] { Str(person, "name"), Units(units), Math.Round(earned, 2), Math.Round(paid, 2), balances.TryGetValue(id, out var b) ? b : 0, Str(person, "note") });
             }
             return sheets;
+        }
+
+        /// <summary>Whole units stay a plain number in Excel; a part of a unit stays a number too, cut to four places.</summary>
+        private static object Units(double units)
+        {
+            var rounded = Math.Round(units, 4);
+            return rounded == Math.Floor(rounded) && Math.Abs(rounded) < int.MaxValue ? (object)(int)rounded : rounded;
         }
 
         private static string Span(string from, string until) =>

@@ -191,7 +191,7 @@ aside > * { flex: none; }
 .field input, .field select { height: 38px; padding: 0 11px; border: 0; background: var(--field); color: var(--ink); font-size: 15px; font-weight: 400; }
 .field input::placeholder { color: var(--muted); }
 .extend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; }
+.facts { display: grid; grid-template-columns: fit-content(45%) 1fr; gap: 3px 14px; }   /* a long request label wraps instead of squeezing its value */
 .facts dt { color: var(--muted); font-size: 14px; }
 .facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
 .where { display: flex; align-items: center; gap: 10px; }
@@ -462,6 +462,10 @@ aside .sub { margin-top: 4px; }
 .fix-box { display: grid; gap: 8px; max-width: 560px; padding: 12px 14px; border-radius: var(--r); background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
 .fix-box .sub { margin: 0; }
 .fix-box .acts { justify-content: flex-start; }
+.share-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.seg.small button { height: 28px; padding: 0 10px; font-size: 13px; border-radius: 8px; }
+.seg [aria-checked=true] { background: var(--tint); color: var(--accent); }
+.facts.asked { padding: 8px 10px; border-radius: 8px; background: var(--raised); font-size: 14px; }
 .person-cols { flex: 1; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr); gap: 10px; margin-left: var(--edge); overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: thin; }
 .person-col { scroll-snap-align: start; }
 .work.solo { grid-template-columns: minmax(0, 1fr); padding-right: var(--edge); }

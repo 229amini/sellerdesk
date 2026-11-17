@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.11.0
+
+- Finance takes part of a unit. Split a one-unit custom order 70/30 between two people, or give someone 1.5 of a 3-unit order.
+- The split panel has a **Units / %** switch. In % you type each person's share of the order; a one-unit order opens in %. Half now gives an exact half, so 1 unit splits as 0.5 and 0.5.
+- Request orders show every field the buyer filled in, with its label, as Eldorado's order page shows it: level, platform, completion method and the buyer's extra note ("10 turbine"). You see them in the Orders side panel and next to the split. The note also joins the order's title and its alerts.
+- The server needs 1.11.0 too, or it refuses a share with a decimal.
+
 ## 1.10.0
 
 - Custom request and boosting orders now show what the buyer asked for, in their own words: "Custom Request | 100 herbals | PC" or "Power Leveling | 1 → 75 | PC". Eldorado only names the category on the order, so SellerDesk takes the text from the request the buyer sent before ordering.

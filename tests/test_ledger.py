@@ -40,8 +40,10 @@ class LedgerTests(unittest.TestCase):
         a, b = self.ann["id"], self.bob["id"]
         bad = [
             [{"person": a, "units": 0}],
-            [{"person": a, "units": 1.5}],
+            [{"person": a, "units": -0.5}],
+            [{"person": a, "units": "1"}],
             [{"person": a, "units": 3}, {"person": b, "units": 2}],  # 5 > 4
+            [{"person": a, "units": 2.5}, {"person": b, "units": 1.6}],  # 4.1 > 4
             [{"person": "ghost", "units": 1}],
             [{"person": a, "units": 1}, {"person": a, "units": 1}],
         ]
@@ -52,6 +54,30 @@ class LedgerTests(unittest.TestCase):
         stored, _ = self.ledger.put_order("o1", order(shares=[{"person": a, "units": 4}]))
         self.assertEqual(stored["net"], 8.5)  # 15 % fallback for items
         self.assertFalse(stored["netExact"])
+
+    def test_part_of_a_unit(self):
+        a, b = self.ann["id"], self.bob["id"]
+        # A one-unit custom order split 70/30, given as decimals the way the percent box sends them.
+        stored, _ = self.ledger.put_order("o1", order(total=10.0, quantity=1,
+                                                      shares=[{"person": a, "units": 0.7}, {"person": b, "units": 0.3}]))
+        self.assertEqual([s["units"] for s in stored["shares"]], [0.7, 0.3])
+        # 0.1 + 0.2 + 0.7 adds up a hair over 1 in floats; it must still fit a one-unit order.
+        self.ledger.put_order("o4", order(quantity=1, shares=[{"person": a, "units": 0.1}, {"person": b, "units": 0.2},
+                                                              {"person": self.ledger.add_person("Cy")[0]["id"], "units": 0.7}]))
+        self.ledger.put_order("o4", order(shares=[]))
+        # Long tails are cut to six places.
+        self.ledger.put_order("o2", order(quantity=1, shares=[{"person": a, "units": 1 / 3}, {"person": b, "units": 2 / 3}]))
+        self.assertEqual([s["units"] for s in self.ledger.snapshot()["orders"]["o2"]["shares"]], [0.333333, 0.666667])
+        whole, _ = self.ledger.put_order("o3", order(shares=[{"person": a, "units": 2.0}]))
+        self.assertIsInstance(whole["shares"][0]["units"], int)
+        rows = {r["person"]: r for r in self.ledger.summary()}
+        self.assertEqual(rows[a]["earned"], round(8.5 * 0.7 + 8.5 / 3 + 8.5 * 2 / 4, 2))
+        self.assertEqual(rows[b]["units"], 0.966667)
+        self.assertEqual(rows[a]["units"], 3.033333)
+        # A saved ledger with split units loads back without anything set aside as damaged.
+        again = Ledger(self.path)
+        self.assertEqual(again.snapshot()["orders"]["o1"]["shares"][1]["units"], 0.3)
+        self.assertFalse([f for f in os.listdir(self.dir.name) if ".bad-" in f])
 
     def test_empty_shares_delete_the_order(self):
         self.ledger.put_order("o1", order(shares=[{"person": self.ann["id"], "units": 1}]))

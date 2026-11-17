@@ -34,6 +34,8 @@ FIRST_SYNC_SECONDS = 60
 MAX_AMOUNT = 1e9
 MAX_UNITS = 10_000_000_000
 MAX_NOTE = 300
+UNIT_DIGITS = 6        # 33.3333% of a one-unit order is 0.333333 units
+UNIT_SLACK = 1e-9      # float sums like 0.1 + 0.2 must not read as "more than the order"
 
 
 class NotFound(LookupError):
@@ -73,6 +75,21 @@ def _whole(value, name: str) -> int:
     return int(value)
 
 
+def _units(value, name: str) -> int | float:
+    """A share's units: a part of a unit is allowed (0.5 of a one-unit order), kept to UNIT_DIGITS places.
+
+    Whole numbers stay int, so a ledger with no split units reads the same as before.
+    """
+    number = round(_number(value, name), UNIT_DIGITS)
+    if abs(number) > MAX_UNITS:
+        raise ValueError(f"{name} is too large")
+    return int(number) if number == int(number) else number
+
+
+def _is_units(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _check(current, expect) -> None:
     """expect is the 'changed' value the caller saw, or None to skip the check."""
     if expect is not None and int(current or 0) != expect:
@@ -83,7 +100,7 @@ def _valid_order(order) -> bool:
     try:
         return (isinstance(order, dict) and isinstance(order.get("shares", []), list)
                 and all(isinstance(s, dict) and isinstance(s.get("person"), str)
-                        and isinstance(s.get("units"), int) for s in order.get("shares", []))
+                        and _is_units(s.get("units")) for s in order.get("shares", []))
                 and isinstance(order.get("quantity", 0), int)
                 and isinstance(order.get("net", 0.0), (int, float)))
     except (TypeError, AttributeError):
@@ -292,6 +309,8 @@ class Ledger:
             if row is not None:
                 row["paid"] += payment["amount"]
         for row in rows.values():
+            units = round(row["units"], UNIT_DIGITS)
+            row["units"] = int(units) if units == int(units) else units
             row["earned"] = round(row["earned"], 2)
             row["paid"] = round(row["paid"], 2)
             row["balance"] = round(row["earned"] - row["paid"], 2)
@@ -426,14 +445,14 @@ class Ledger:
             if not isinstance(share, dict):
                 raise ValueError("each share needs person and units")
             person = _string(share.get("person"), "share person", required=True)
-            units = _whole(share.get("units"), "share units")
+            units = _units(share.get("units"), "share units")
             if units <= 0:
                 raise ValueError("share units must be positive")
             if person in seen:
                 raise ValueError("a person can have only one share per order")
             seen.add(person)
             order["shares"].append({"person": person, "units": units})
-        if sum(s["units"] for s in order["shares"]) > quantity:
+        if sum(s["units"] for s in order["shares"]) > quantity + UNIT_SLACK:
             raise ValueError(f"shares add up to more than the order's {quantity} units")
 
         def edit(data):

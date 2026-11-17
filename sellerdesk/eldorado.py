@@ -33,6 +33,16 @@ def format_request(fields) -> str:
     return line if len(line) <= 240 else line[:239] + "…"
 
 
+# Nearly every request says "Solo" here, so it stays out of the one-line title.
+NOT_IN_TITLE = {"completion method"}
+
+
+def format_details(values) -> str:
+    """descriptionValues of a request's details page ([{label, value}, ...]) as one line."""
+    return format_request(v.get("value") for v in values
+                          if isinstance(v, dict) and str(v.get("label") or "").strip().lower() not in NOT_IN_TITLE)
+
+
 @dataclass(frozen=True)
 class Order:
     id: str
@@ -177,6 +187,21 @@ class EldoradoClient:
                 if not rows or not cursor:
                     break
         return found
+
+    def request_details(self, request_id: str) -> str:
+        """The whole request, as the site's order page reads it, in one line; "" when the request is gone.
+
+        The notification leaves out fields such as "Provide any additional information", so this is the
+        better source once an order points to the request.
+        """
+        path = f"/api/boostingOffers/boostingRequests/{urllib.parse.quote(request_id, safe='')}/details"
+        try:
+            reply = json.loads(self._call("GET", path) or "{}")
+        except HttpError as error:
+            if error.status == 404:
+                return ""
+            raise
+        return format_details(reply.get("descriptionValues") or [])
 
     def unread_notices(self) -> list[Notice]:
         reply = json.loads(self._call("GET", "/api/notifications/me",

@@ -237,7 +237,7 @@ function choice(attrs, items, value) {
 
 function topBar() {
   const open = openOrders().length;
-  const unassigned = state.finance && state.finance.ready ? sales90().filter(o => assignedUnits(o) < o.quantity).length : null;
+  const unassigned = state.finance && state.finance.ready ? sales90().filter(o => leftOf(o) > UNIT_EPS).length : null;
   const tabs = [['home', 'Home', null], ['offers', 'Offers', state.offers.filter(isLive).length], ['orders', 'Orders', open], ['sales', 'Sales', null], ['customers', 'Customers', null], ['finance', 'Finance', unassigned], ['insights', 'Insights', null]];
   return h('header', { class: 'top' },
     h('b', { class: 'name', title: state.version ? 'SellerDesk ' + state.version : 'SellerDesk' }, h('span', { class: 'mark' }, logo()), h('span', { class: 'label' }, 'SellerDesk')),
@@ -681,7 +681,7 @@ function orderPanel(o) {
   const facts = [['Buyer', o.buyer], ['Quantity', o.quantity], ['Each', o.each], ['Total', o.total], ['Placed', o.placed ? dayOf(o.placed) : ''], ['State', o.state], ['Review', o.review], ['Dispute', o.dispute]];
   return h('aside', { 'aria-label': 'Selected order' },
     h('div', { class: 'head' }, orderPicture(o), h('div', {}, h('h2', {}, o.title))),
-    h('dl', { class: 'facts' }, facts.filter(([, value]) => value).map(([label, value]) => [h('dt', {}, label), h('dd', {}, value)])),
+    h('dl', { class: 'facts' }, facts.concat(askedFacts(o)).filter(([, value]) => value).map(([label, value]) => [h('dt', {}, label), h('dd', {}, value)])),
     ledger() && o.buyer ? h('label', { class: 'buyer-note' }, h('span', {}, `Your note on ${o.buyer}`),
       h('textarea', { 'data-buyer-note': o.buyer, rows: 2, maxlength: 300, placeholder: 'Like: big orders, or slow to reply. Every PC sees it.', spellcheck: 'false' }, buyerNote(o.buyer))) : null,
     o.state === 'Paid' ? orderActions() : null,
@@ -1070,13 +1070,21 @@ const ledger = () => (state.finance && state.finance.ledger) || null;
 const people = (all) => (ledger() ? ledger().people : []).filter(p => all || !p.archived);
 const personName = id => (people(true).find(p => p.id === id) || {}).name || 'Removed';
 const ledgerOrder = id => (ledger() && ledger().orders[id]) || null;
-const assignedUnits = o => { const l = ledgerOrder(o.id); return l ? l.shares.reduce((a, s) => a + s.units, 0) : 0; };
+const assignedUnits = o => { const l = ledgerOrder(o.id); return l ? roundUnits(l.shares.reduce((a, s) => a + s.units, 0)) : 0; };
+// Shares may be a part of a unit (half of a one-unit custom order), kept to six places like the ledger.
+const UNIT_EPS = 1e-6;
+const roundUnits = n => Math.round((Number(n) || 0) * 1e6) / 1e6;
+const leftOf = o => roundUnits(o.quantity - assignedUnits(o));
+const fmtUnits = n => String(Math.round((Number(n) || 0) * 1e4) / 1e4);
+const fmtPercent = n => String(Math.round((Number(n) || 0) * 100) / 100);
+// What the buyer filled in on a request order, label by label, as the order page on Eldorado shows it.
+const askedFacts = o => (o && o.asked ? o.asked : []).filter(r => r && r[1]);
 const balanceOf = id => (ledger() ? ledger().summary : []).find(s => s.person === id) || { earned: 0, paid: 0, balance: 0, units: 0, orders: 0 };
 const sales90 = () => state.orders.filter(o => o.sale && o.placed >= Date.now() - 90 * 864e5);
 
 function financeOrders() {
   const list = sales90();
-  if (financeShown === 'open') return list.filter(o => assignedUnits(o) < o.quantity);
+  if (financeShown === 'open') return list.filter(o => leftOf(o) > UNIT_EPS);
   if (financeShown === 'people') return [];
   return list;
 }
@@ -1114,27 +1122,27 @@ function personCard(p) {
   const on = financePick && financePick.kind === 'person' && financePick.id === p.id;
   return h('button', { type: 'button', class: on ? 'person on' : 'person', 'data-do': 'pickPerson', 'data-value': p.id, 'data-key': 'p' + p.id },
     h('span', { class: 'avatar', 'aria-hidden': 'true' }, p.name.slice(0, 1).toUpperCase()),
-    h('span', { class: 'who' }, h('b', {}, p.name), h('small', {}, `${plural(b.units, 'unit')}, earned ${dollars(b.earned)}`)),
+    h('span', { class: 'who' }, h('b', {}, p.name), h('small', {}, `${plural(Number(fmtUnits(b.units)), 'unit')}, earned ${dollars(b.earned)}`)),
     h('span', { class: b.balance > 0.004 ? 'owed' : 'owed clear' }, h('small', {}, b.balance > 0.004 ? 'You owe' : 'Settled'), dollars(Math.abs(b.balance))));
 }
 
 function sharesCell(o) {
   const l = ledgerOrder(o.id);
   if (!l || !l.shares.length) return h('span', { class: 'pill warn' }, 'Not assigned');
-  const left = o.quantity - assignedUnits(o);
-  return h('div', { class: 'tags' }, l.shares.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${s.units}`)),
-    left > 0 ? h('span', { class: 'pill warn' }, `${left} left`) : null);
+  const left = leftOf(o);
+  return h('div', { class: 'tags' }, l.shares.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${fmtUnits(s.units)}`)),
+    left > UNIT_EPS ? h('span', { class: 'pill warn' }, `${fmtUnits(left)} left`) : null);
 }
 
 // One click gives every unit still unassigned to that person and saves; Split opens the panel for anything finer.
 function assignCell(o) {
   const l = ledgerOrder(o.id);
-  const left = o.quantity - assignedUnits(o);
+  const left = leftOf(o);
   return h('div', { class: 'give' },
-    l && l.shares.length ? l.shares.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${s.units}`)) : null,
+    l && l.shares.length ? l.shares.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${fmtUnits(s.units)}`)) : null,
     people(false).map(p => h('button', {
       type: 'button', class: 'chip', 'data-do': 'quickAssign', 'data-order': o.id, 'data-person': p.id,
-      title: `Give ${left === o.quantity ? 'all' : 'the other'} ${plural(left, 'unit')} to ${p.name} and save`,
+      title: `Give ${left === o.quantity ? 'all' : 'the other'} ${plural(Number(fmtUnits(left)), 'unit')} to ${p.name} and save`,
     }, l && l.shares.length ? `Rest to ${p.name}` : p.name)),
     h('button', { type: 'button', class: 'chip quiet', 'data-do': 'pickFinOrder', 'data-order': o.id }, 'Split'));
 }
@@ -1153,7 +1161,7 @@ function personColumn(p, pickOrder) {
       },
         orderPicture(o),
         h('span', { class: 'named' }, h('b', {}, o.title), h('small', {}, `${shortDay(o.placed)}, ${o.buyer}`)),
-        h('span', { class: 'units', title: `${units} of the order's ${o.quantity} units` }, units < o.quantity ? `${units} of ${o.quantity}` : units),
+        h('span', { class: 'units', title: `${fmtUnits(units)} of the order's ${o.quantity} units` }, units < o.quantity - UNIT_EPS ? `${fmtUnits(units)} of ${o.quantity}` : fmtUnits(units)),
         h('span', { class: 'fix' }, 'Fix'))))
       : h('p', { class: 'hint' }, 'Nothing assigned in the last 90 days.'));
 }
@@ -1165,33 +1173,55 @@ function assignPanel(o) {
     h('dl', { class: 'facts' },
       h('dt', {}, 'Units'), h('dd', {}, o.quantity),
       h('dt', {}, 'Order total'), h('dd', {}, o.total),
-      l ? [h('dt', {}, 'After Eldorado fee'), h('dd', {}, dollars(l.net), ' ', h('small', { class: 'quiet' }, l.netExact ? 'exact' : 'estimate until it clears'))] : null),
+      l ? [h('dt', {}, 'After Eldorado fee'), h('dd', {}, dollars(l.net), ' ', h('small', { class: 'quiet' }, l.netExact ? 'exact' : 'estimate until it clears'))] : null,
+      askedFacts(o).map(([label, value]) => [h('dt', {}, label), h('dd', {}, value)])),
     shareEditor(o),
     h('p', { class: 'note', role: 'status' }, state.finance.note));
 }
 
-// Whose units an order's are: a row per person with − + and All, Rest, Half, then Save.
-function shareEditor(o) {
+// Whose units an order's are: a row per person with − + and All, Rest, Half, then Save. The Units / %
+// switch types the same share as units (0.5) or as a percent of the order (50); a one-unit order opens in %.
+let shareMode = null;   // 'units' | 'percent'; null follows the order
+const modeFor = o => shareMode || (o.quantity === 1 ? 'percent' : 'units');
+const shareShown = (o, units) => {
+  if (units === undefined || units === '' || !(Number(units) > 0)) return '';
+  return modeFor(o) === 'percent' ? fmtPercent(Number(units) / o.quantity * 100) : String(units);
+};
+
+function shareEditor(o, withAsked) {
   const draft = draftFor(o);
-  const total = Object.values(draft).reduce((a, n) => a + (Number(n) || 0), 0);
+  const total = roundUnits(Object.values(draft).reduce((a, n) => a + (Number(n) || 0), 0));
+  const over = total > o.quantity + UNIT_EPS;
   const l = ledgerOrder(o.id);
   const list = people(false);
+  const percent = modeFor(o) === 'percent';
+  const asked = withAsked ? askedFacts(o) : [];
   return list.length ? [
-      h('h3', { class: 'sub' }, 'Whose units are these?'),
+      asked.length ? h('dl', { class: 'facts asked' }, asked.map(([label, value]) => [h('dt', {}, label), h('dd', {}, value)])) : null,
+      h('div', { class: 'share-top' },
+        h('h3', { class: 'sub' }, 'Whose units are these?'),
+        h('div', { class: 'seg small', role: 'radiogroup', 'aria-label': 'Split by' },
+          [['units', 'Units'], ['percent', '%']].map(([mode, label]) => h('button', {
+            type: 'button', role: 'radio', 'data-do': 'shareMode', 'data-value': mode,
+            'aria-checked': String(modeFor(o) === mode), 'aria-selected': String(modeFor(o) === mode),
+            title: mode === 'percent' ? 'Type each share as a percent of the order' : 'Type each share in units; 0.5 is half a unit',
+          }, label)))),
       h('div', { class: 'shares' }, list.map(p => h('div', { class: 'share-row', 'data-key': 's' + p.id },
         h('div', { class: 'share-head' }, h('b', {}, p.name),
           l && l.quantity ? h('small', { class: 'quiet' }, dollars(l.net * (Number(draft[p.id]) || 0) / l.quantity)) : null),
         h('div', { class: 'share-ctl' },
-          h('div', { class: 'quick' },
+          h('div', { class: percent ? 'quick pct' : 'quick' },
             h('button', { type: 'button', tabindex: -1, 'data-do': 'shareStep', 'data-value': p.id, 'data-dir': -1, 'aria-label': p.name + ' fewer' }, minus()),
-            h('input', { 'data-fin': 'units', 'data-person': p.id, value: draft[p.id] || '', placeholder: '0', inputmode: 'numeric', autocomplete: 'off', 'aria-label': p.name + ' units' }),
+            h('input', { 'data-fin': 'units', 'data-person': p.id, 'data-key': 'u' + p.id + (percent ? '%' : ''), value: shareShown(o, draft[p.id]), placeholder: '0', inputmode: 'decimal', autocomplete: 'off', 'aria-label': p.name + (percent ? ' percent' : ' units') }),
             h('button', { type: 'button', tabindex: -1, 'data-do': 'shareStep', 'data-value': p.id, 'data-dir': 1, 'aria-label': p.name + ' more' }, plus())),
-          h('button', { type: 'button', class: 'tool', 'data-do': 'giveAll', 'data-value': p.id, title: `All ${o.quantity} units to ${p.name}` }, 'All'),
-          h('button', { type: 'button', class: 'tool', 'data-do': 'giveRest', 'data-value': p.id, title: `The units nobody has yet, to ${p.name}` }, 'Rest'),
-          h('button', { type: 'button', class: 'tool', 'data-do': 'giveHalf', 'data-value': p.id, title: `Half of the order, ${Math.round(o.quantity / 2)} units, to ${p.name}` }, 'Half'))))),
-      h('p', { class: total > o.quantity ? 'note bad' : 'note' }, total > o.quantity ? `That's ${total} units, the order has ${o.quantity}.` : `${total} of ${o.quantity} units assigned`),
+          h('button', { type: 'button', class: 'tool', 'data-do': 'giveAll', 'data-value': p.id, title: `All of the order to ${p.name}` }, 'All'),
+          h('button', { type: 'button', class: 'tool', 'data-do': 'giveRest', 'data-value': p.id, title: `What nobody has yet, to ${p.name}` }, 'Rest'),
+          h('button', { type: 'button', class: 'tool', 'data-do': 'giveHalf', 'data-value': p.id, title: `Half of the order, ${plural(o.quantity / 2, 'unit')}, to ${p.name}` }, 'Half'))))),
+      h('p', { class: over ? 'note bad' : 'note' }, over
+        ? (percent ? `That's ${fmtPercent(total / o.quantity * 100)}%, more than the whole order.` : `That's ${fmtUnits(total)} units, the order has ${o.quantity}.`)
+        : (percent ? `${fmtPercent(total / o.quantity * 100)}% of the order assigned` : `${fmtUnits(total)} of ${o.quantity} units assigned`)),
       h('div', { class: 'acts' },
-        h('button', { type: 'button', class: 'solid', 'data-do': 'saveShares', disabled: total > o.quantity || state.finance.busy }, 'Save'),
+        h('button', { type: 'button', class: 'solid', 'data-do': 'saveShares', disabled: over || state.finance.busy }, 'Save'),
         l ? h('button', { type: 'button', class: 'line', 'data-do': 'clearShares' }, 'Unassign') : null),
     ] : h('p', { class: 'insight' }, 'Add a person first.');
 }
@@ -1200,14 +1230,14 @@ function shareEditor(o) {
 // so a unit given to the wrong person moves without leaving the list.
 function personList(p) {
   const l = ledger();
-  const rows = Object.entries(l.orders).map(([id, o]) => ({ id, o, units: o.shares.filter(s => s.person === p.id).reduce((a, s) => a + s.units, 0) }))
+  const rows = Object.entries(l.orders).map(([id, o]) => ({ id, o, units: roundUnits(o.shares.filter(s => s.person === p.id).reduce((a, s) => a + s.units, 0)) }))
     .filter(r => r.units > 0).sort((a, b) => Date.parse(b.o.placed) - Date.parse(a.o.placed));
-  const units = rows.reduce((a, r) => a + r.units, 0);
+  const units = roundUnits(rows.reduce((a, r) => a + r.units, 0));
   const money = rows.reduce((a, r) => a + r.o.net * r.units / Math.max(1, r.o.quantity), 0);
   return h('section', { class: 'card person-list', 'data-key': 'pl' + p.id },
     h('div', { class: 'head' },
       h('span', { class: 'avatar', 'aria-hidden': 'true' }, p.name.slice(0, 1).toUpperCase()),
-      h('span', { class: 'who' }, h('b', {}, `${p.name}'s orders`), h('small', {}, `${plural(rows.length, 'order')}, ${plural(units, 'unit')}, ${dollars(money)} earned. Click an order to change whose units it is.`))),
+      h('span', { class: 'who' }, h('b', {}, `${p.name}'s orders`), h('small', {}, `${plural(rows.length, 'order')}, ${plural(Number(fmtUnits(units)), 'unit')}, ${dollars(money)} earned. Click an order to change whose units it is.`))),
     rows.length ? h('div', { class: 'scroll' }, h('table', { class: 'orders finance mine' },
       h('colgroup', {}, ['placed', 'item', 'buyer', 'qty', 'total', 'whose'].map(c => h('col', { class: 'f-' + c }))),
       h('thead', {}, h('tr', {}, ['Placed', 'Order', 'Buyer', 'Units', 'Their share', 'Shared with'].map(t => h('th', { scope: 'col' }, t)))),
@@ -1219,11 +1249,11 @@ function personList(p) {
           h('td', { class: 'quiet' }, dayOf(Date.parse(o.placed))),
           h('td', {}, h('div', { class: 'it' }, orderPicture(order), h('b', {}, o.title))),
           h('td', {}, order.buyer || h('span', { class: 'quiet' }, '')),
-          h('td', {}, theirs < o.quantity ? `${theirs} of ${o.quantity}` : theirs),
+          h('td', {}, theirs < o.quantity - UNIT_EPS ? `${fmtUnits(theirs)} of ${o.quantity}` : fmtUnits(theirs)),
           h('td', {}, dollars(o.net * theirs / Math.max(1, o.quantity)), o.netExact ? null : h('small', { class: 'quiet', title: 'Estimate until Eldorado clears the order' }, ' est')),
-          h('td', {}, others.length ? h('div', { class: 'tags' }, others.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${s.units}`))) : h('span', { class: 'quiet' }, 'Nobody'))),
+          h('td', {}, others.length ? h('div', { class: 'tags' }, others.map(s => h('span', { class: 'pill' }, `${personName(s.person)} ${fmtUnits(s.units)}`))) : h('span', { class: 'quiet' }, 'Nobody'))),
         open ? h('tr', { class: 'fix-row', 'data-key': id + '-fix' }, h('td', { colspan: innerWidth <= 1100 ? 5 : 6 },   // style.css hides Buyer at 1100
-          h('div', { class: 'fix-box' }, shareEditor(order), h('p', { class: 'note', role: 'status' }, state.finance.note)))) : null].filter(Boolean);
+          h('div', { class: 'fix-box' }, shareEditor(order, true), h('p', { class: 'note', role: 'status' }, state.finance.note)))) : null].filter(Boolean);
       })))) : h('p', { class: 'hint' }, 'Nothing assigned to them yet.'));
 }
 
@@ -1283,7 +1313,7 @@ function financePage() {
   }
   if (!state.finance.ready) return h('p', { class: 'empty' }, state.finance.note || 'Reading the ledger from your server.');
   const list = financeOrders();
-  const open = sales90().filter(o => assignedUnits(o) < o.quantity).length;
+  const open = sales90().filter(o => leftOf(o) > UNIT_EPS).length;
   if (!financePick || (financePick.kind === 'person' && !people(true).some(p => p.id === financePick.id))) financePick = list[0] ? { kind: 'order', id: list[0].id } : null;
   const byPerson = financeShown === 'people';
   const pickOrder = financePick && financePick.kind === 'order' ? state.orders.find(o => o.id === financePick.id) : null;
@@ -1455,14 +1485,14 @@ const CLICKS = {
     const o = fixOrder();
     if (!o) return;
     const draft = draftFor(o);
-    const left = o.quantity - Object.values(draft).reduce((a, n) => a + (Number(n) || 0), 0);
-    if (left > 0) draft[target.dataset.value] = (Number(draft[target.dataset.value]) || 0) + left;
+    const left = roundUnits(o.quantity - Object.values(draft).reduce((a, n) => a + (Number(n) || 0), 0));
+    if (left > UNIT_EPS) draft[target.dataset.value] = roundUnits((Number(draft[target.dataset.value]) || 0) + left);
     draw();
   },
   giveHalf(target) {
     const o = fixOrder();
     if (!o) return;
-    draftFor(o)[target.dataset.value] = Math.round(o.quantity / 2);
+    draftFor(o)[target.dataset.value] = o.quantity / 2;
     draw();
   },
   quickAssign(target) {
@@ -1471,9 +1501,9 @@ const CLICKS = {
     const l = ledgerOrder(o.id);
     const shares = {};
     for (const s of l ? l.shares : []) shares[s.person] = (shares[s.person] || 0) + s.units;
-    const left = o.quantity - Object.values(shares).reduce((a, n) => a + n, 0);
-    if (left <= 0) return;
-    shares[target.dataset.person] = (shares[target.dataset.person] || 0) + left;
+    const left = roundUnits(o.quantity - Object.values(shares).reduce((a, n) => a + n, 0));
+    if (left <= UNIT_EPS) return;
+    shares[target.dataset.person] = roundUnits((shares[target.dataset.person] || 0) + left);
     send('assign', { order: o.id, changed: changedOf(l), shares: Object.entries(shares).map(([person, units]) => ({ person, units })) });
     delete assignDraft[o.id];
     delete draftSeen[o.id];
@@ -1482,7 +1512,14 @@ const CLICKS = {
     const o = fixOrder();
     if (!o) return;
     const draft = draftFor(o);
-    draft[target.dataset.value] = Math.max(0, (Number(draft[target.dataset.value]) || 0) + Number(target.dataset.dir));
+    // A step is one unit, or 10% of the order in % mode.
+    const step = modeFor(o) === 'percent' ? o.quantity / 10 : 1;
+    draft[target.dataset.value] = Math.max(0, roundUnits((Number(draft[target.dataset.value]) || 0) + step * Number(target.dataset.dir)));
+    draw();
+  },
+  shareMode(target) {
+    shareMode = target.dataset.value;
+    editing = null;
     draw();
   },
   saveShares() {
@@ -1490,7 +1527,7 @@ const CLICKS = {
     if (!id) return;
     const draft = assignDraft[id] || {};
     const changed = id in draftSeen ? draftSeen[id] : changedOf(ledgerOrder(id));
-    send('assign', { order: id, changed, shares: Object.entries(draft).filter(([, n]) => Number(n) > 0).map(([person, units]) => ({ person, units: Number(units) })) });
+    send('assign', { order: id, changed, shares: Object.entries(draft).filter(([, n]) => Number(n) > 0).map(([person, units]) => ({ person, units: roundUnits(units) })) });
     delete assignDraft[id];
     delete draftSeen[id];
   },
@@ -1618,7 +1655,15 @@ document.addEventListener('input', event => {
   } else if (node.dataset.fin) {
     editing = node;
     if (node.dataset.fin === 'units') {
-      draftFor(fixOrder())[node.dataset.person] = node.value.replace(/\D/g, '');
+      // Units or percent, with a decimal point or comma: "0.5", "33,3".
+      const o = fixOrder();
+      let text = node.value.replace(',', '.').replace(/[^\d.]/g, '');
+      const dot = text.indexOf('.');
+      if (dot >= 0) text = text.slice(0, dot + 1) + text.slice(dot + 1).replace(/\./g, '');
+      if (text !== node.value) node.value = text;
+      draftFor(o)[node.dataset.person] = modeFor(o) === 'percent'
+        ? (text === '' ? '' : roundUnits(Number(text) / 100 * o.quantity))
+        : text;
       draw();
     } else {
       finDraft[node.dataset.fin] = node.value;

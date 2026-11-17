@@ -279,6 +279,7 @@ namespace SellerDesk
             ["took"] = o.TookMinutes == null ? "" : OfferRow.Span(o.TookMinutes.Value),
             ["review"] = o.Review,
             ["dispute"] = o.Dispute,
+            ["asked"] = o.Asked,
             ["note"] = orderNotes.TryGetValue(o.Id, out var note) ? note : "",
         };
 

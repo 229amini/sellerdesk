@@ -63,7 +63,7 @@
       order('o4', 'Night Visor', 'dex', 1, '1.90 USD', 'Canceled', 0),
       order('o5', 'Arc Cell', 'hana', 5, '1.10 USD', 'Completed', 0, { took: '12 min', review: 'Negative' }),
       order('o6', 'Custom Request | 40 herbals, any rarity, delivered in one trade | PC', 'rio_k', 1, '6.93 USD', 'Received', 0, { took: '9 min', review: 'Positive' }),
-      order('o7', 'Power Leveling | 1 → 75 | Xbox', 'pax', 1, '7.00 USD', 'Completed', 0),
+      order('o7', 'Power Leveling | 1 → 75 | 10 turbine | Xbox', 'pax', 1, '7.00 USD', 'Completed', 0, { asked: [['Current level', '1'], ['Desired level', '75'], ['Platform', 'Xbox'], ['Completion Method', 'Solo'], ['Provide any additional information', '10 turbine']] }),
     ],
     notices: quiet ? [] : [{ id: 'n1', title: 'A buyer messaged you', text: 'Copper Coil, marko_77', link: '/dashboard/orders/sold' }],
     sales: {

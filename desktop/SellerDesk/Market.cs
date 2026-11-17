@@ -91,16 +91,19 @@ namespace SellerDesk
         public string Category = "";    // Currency or an item category, which sets Eldorado's fee
         public string RequestId = "";   // boosting and custom requests: the buyer's request behind the order
         public string Request = "";     // what the buyer wrote, e.g. "100 herbals | PC"
+        public List<string[]> Asked = new List<string[]>();   // the same, field by field: ["Desired level", "75"]
 
         /// <summary>A request order shows what the buyer asked for: "Custom Request | 100 herbals | PC".</summary>
         public SoldOrder Retitle()
         {
+            if (RequestId.Length == 0) return this;
             var asked = Requests.Find(RequestId);
-            if (asked.Length > 0 && Request.Length == 0)
+            if (asked.Length > 0 && asked != Request)
             {
                 Request = asked;
                 Title = (Kind.Length > 0 && Kind != "Other" ? Kind : "Custom Request") + " | " + asked;
             }
+            Asked = Requests.Details(RequestId);
             return this;
         }
 
@@ -536,7 +539,8 @@ namespace SellerDesk
         public void BackfillRequests(IEnumerable<SoldOrder> orders, int maxPages = 4)
         {
             var list = orders.ToList();
-            var waiting = list.Where(o => o.RequestId.Length > 0 && !Requests.Has(o.RequestId))
+            ReadRequestDetails(list, maxPages >= 20 ? 40 : 8);
+            var waiting = list.Where(o => o.RequestId.Length > 0 && !Requests.Has(o.RequestId) && Requests.Find(o.RequestId).Length == 0)
                 .GroupBy(o => o.RequestId).Select(g => g.First()).ToList();
             if (waiting.Count == 0)
             {
@@ -592,6 +596,35 @@ namespace SellerDesk
                     .Select(o => o.RequestId));
             }
             foreach (var order in list) order.Retitle();
+        }
+
+        /// <summary>
+        /// Reads each request order's full request (GET /api/boostingOffers/boostingRequests/{id}/details,
+        /// the call the site's order page makes): every field with its label, including the ones the
+        /// notification leaves out. Newest orders first, at most `limit` calls a pass; each is read once.
+        /// </summary>
+        private void ReadRequestDetails(List<SoldOrder> orders, int limit)
+        {
+            var waiting = orders.Where(o => o.RequestId.Length > 0 && !Requests.HasDetails(o.RequestId))
+                .OrderByDescending(o => o.Placed).Select(o => o.RequestId).Distinct().Take(limit).ToList();
+            foreach (var id in waiting)
+            {
+                try
+                {
+                    var reply = Read($"/api/boostingOffers/boostingRequests/{Uri.EscapeDataString(id)}/details", new Dictionary<string, string>(), true);
+                    Requests.Learn(id, List(reply, "descriptionValues")
+                        .Select(v => new[] { Text(v, "label"), Text(v, "value") }).ToList());
+                }
+                catch (MarketError error) when (error.Status == 404)
+                {
+                    Requests.Learn(id, null);
+                }
+                catch (MarketError error)
+                {
+                    Config.Log("request details: " + error.Message);
+                    return;   // a rate limit or a dropped line: try the rest on the next pass
+                }
+            }
         }
 
         private static Notice ToNotice(Dictionary<string, object> raw)

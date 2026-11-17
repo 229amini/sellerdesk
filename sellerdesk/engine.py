@@ -85,6 +85,7 @@ class Engine:
         self.state.setdefault("disputes", [])
         self.state.setdefault("notices", [])
         self.state.setdefault("requests", {})   # boosting request id -> what the buyer wrote ("" = not found)
+        self.state.setdefault("requests_full", {})   # the same from the request's details page, every field
         self.commands: queue.SimpleQueue = queue.SimpleQueue()  # filled by the dashboard thread
         self.wake = threading.Event()
         self.health = {channel.name: {"ok": None, "error": ""} for channel in channels}
@@ -215,9 +216,21 @@ class Engine:
                      headline)
 
     def _with_requests(self, orders: list[Order]) -> list[Order]:
-        """Request orders carry only "Custom Request"; the buyer's words come from the request's notification."""
+        """Request orders carry only "Custom Request"; the buyer's words come from the request itself.
+
+        The request's details page has every field; the notification is the fallback when that read fails.
+        """
+        full = self.state["requests_full"]
+        for request_id in list(dict.fromkeys(o.request_id for o in orders if o.request_id and o.request_id not in full))[:10]:
+            try:
+                full[request_id] = self.api.request_details(request_id)
+            except Exception as error:  # a title must not stop the alarm
+                log.warning("request details failed: %s", error)
+                break
+        for request_id in list(full)[:-1000]:
+            del full[request_id]
         known = self.state["requests"]
-        missing = [o.request_id for o in orders if o.request_id and o.request_id not in known]
+        missing = [o.request_id for o in orders if o.request_id and o.request_id not in known and not full.get(o.request_id)]
         if missing:
             try:
                 found = self.api.find_requests(missing)
@@ -228,7 +241,8 @@ class Engine:
                 for request_id in missing:
                     known[request_id] = found.get(request_id, "")
                 self._trim_requests()
-        return [o.with_request(known.get(o.request_id, "")) if o.request_id else o for o in orders]
+        return [o.with_request(full.get(o.request_id) or known.get(o.request_id, "")) if o.request_id else o
+                for o in orders]
 
     def _trim_requests(self, keep: int = 1000):
         known = self.state["requests"]
