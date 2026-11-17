@@ -3,7 +3,7 @@ import unittest
 from sellerdesk.channels import Alert, Channel
 from sellerdesk.config import Settings
 from sellerdesk.deadline import Stage, parse_time, repeat_interval, stage_for
-from sellerdesk.eldorado import Notice, Order
+from sellerdesk.eldorado import Notice, Order, format_request
 from sellerdesk.engine import DEFAULT_OFF, Engine, alert_kind, clean_prefs
 
 
@@ -19,6 +19,11 @@ class FakeApi:
     def __init__(self):
         self.paid, self.disputed, self.notices = [], [], []
         self.offline_calls = 0
+        self.requests, self.request_lookups = {}, []
+
+    def find_requests(self, request_ids):
+        self.request_lookups.append(list(request_ids))
+        return {i: self.requests[i] for i in request_ids if i in self.requests}
 
     def orders(self, state):
         return self.paid if state == "Paid" else self.disputed
@@ -292,3 +297,52 @@ class DeadManSwitchedOff(Harness):
         self.engine.tick()
         self.advance(3600)
         self.assertEqual(self.api.offline_calls, 0)
+
+
+def request_notice(notice_id, request_id, fields, category="Custom Request"):
+    return Notice.from_api({"customNotification": None, "notification": {
+        "id": notice_id, "event": "BoostingRequestCreated",
+        "details": {"detailsId": request_id, "gameCategoryTitle": category, "buyerUsername": "amy"},
+        "customNotificationData": {"requestFields": fields}}})
+
+
+def request_order(clock, request_id, order_id="r1"):
+    return Order(order_id, "Custom Request", 1, 2.1, "USD", "amy", f"https://x/order/{order_id}",
+                 clock.now, 1200, kind="Custom Request", request_id=request_id)
+
+
+class RequestOrders(Harness):
+    def test_format_puts_the_buyer_words_first(self):
+        self.assertEqual(format_request(["PC", "100  herbals\n"]), "100 herbals | PC")
+        self.assertEqual(format_request(["1", "75", "PC"]), "1 → 75 | PC")
+        self.assertEqual(format_request(["EU", "5 wins"]), "EU | 5 wins")
+        self.assertEqual(format_request([]), "")
+
+    def test_notice_carries_the_request(self):
+        notice = request_notice("n1", "q1", ["PC", "50 Survivor"])
+        self.assertEqual((notice.request_id, notice.request), ("q1", "50 Survivor | PC"))
+        self.assertEqual(notice.text, "Custom Request: 50 Survivor | PC, amy")
+
+    def test_order_named_from_an_earlier_notice(self):
+        self.api.notices = [request_notice("n1", "q1", ["PC", "100 herbals"])]
+        self.engine.tick()
+        self.api.paid = [request_order(self.clock, "q1")]
+        self.advance(5)
+        self.assertEqual(self.api.request_lookups, [])
+        self.assertIn("Custom Request | 100 herbals | PC", self.channel.sent[-1].body)
+
+    def test_order_looks_up_a_missed_request_once(self):
+        self.api.requests = {"q2": "4 Snap hook | PlayStation"}
+        self.api.paid = [request_order(self.clock, "q2"), request_order(self.clock, "q3", "r2")]
+        self.engine.tick()
+        self.advance(60)
+        self.assertEqual(self.api.request_lookups, [["q2", "q3"]])   # q3 not found: not asked again
+        texts = [a.body for a in self.channel.sent]
+        self.assertTrue(any("Custom Request | 4 Snap hook | PlayStation" in t for t in texts))
+        self.assertTrue(any(t.startswith("Custom Request, ") for t in texts))
+
+    def test_failed_lookup_is_retried_later(self):
+        self.api.paid = [request_order(self.clock, "q4")]
+        self.api.find_requests = lambda ids: (_ for _ in ()).throw(OSError("down"))
+        self.engine.tick()
+        self.assertNotIn("q4", self.engine.state["requests"])

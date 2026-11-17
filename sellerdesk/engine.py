@@ -84,6 +84,7 @@ class Engine:
         self.state.setdefault("alarms", {})     # order id -> alarm record
         self.state.setdefault("disputes", [])
         self.state.setdefault("notices", [])
+        self.state.setdefault("requests", {})   # boosting request id -> what the buyer wrote ("" = not found)
         self.commands: queue.SimpleQueue = queue.SimpleQueue()  # filled by the dashboard thread
         self.wake = threading.Event()
         self.health = {channel.name: {"ok": None, "error": ""} for channel in channels}
@@ -126,9 +127,9 @@ class Engine:
         now = self.clock()
         self._take_commands()
         self._take_acks()
-        self._watch_orders(self.api.orders("Paid"), now)
+        self._watch_notices()   # first, so a request order can name what the buyer asked for
+        self._watch_orders(self._with_requests(self.api.orders("Paid")), now)
         self._watch_disputes()
-        self._watch_notices()
         self._watch_sales(now)
         self._deadman(now)
         self.state["started"] = True
@@ -213,9 +214,30 @@ class Engine:
         return Alert("order", 5, title, order.summary, order.url, order.id, repeat, order.deadline, order.window,
                      headline)
 
+    def _with_requests(self, orders: list[Order]) -> list[Order]:
+        """Request orders carry only "Custom Request"; the buyer's words come from the request's notification."""
+        known = self.state["requests"]
+        missing = [o.request_id for o in orders if o.request_id and o.request_id not in known]
+        if missing:
+            try:
+                found = self.api.find_requests(missing)
+            except Exception as error:  # a title must not stop the alarm
+                log.warning("request lookup failed: %s", error)
+                found = None
+            if found is not None:
+                for request_id in missing:
+                    known[request_id] = found.get(request_id, "")
+                self._trim_requests()
+        return [o.with_request(known.get(o.request_id, "")) if o.request_id else o for o in orders]
+
+    def _trim_requests(self, keep: int = 1000):
+        known = self.state["requests"]
+        for request_id in list(known)[:-keep]:
+            del known[request_id]
+
     def _watch_disputes(self):
         seen = set(self.state["disputes"])
-        for order in self.api.orders("Disputed"):
+        for order in self._with_requests(self.api.orders("Disputed")):
             if order.id not in seen:
                 seen.add(order.id)
                 self._dispatch(Alert("dispute", 4, "Order disputed", order.summary, order.url))
@@ -228,6 +250,9 @@ class Engine:
             if notice.id in seen:
                 continue
             seen.add(notice.id)
+            if notice.request_id and notice.request:
+                self.state["requests"][notice.request_id] = notice.request
+                self._trim_requests()
             # The first poll records the backlog without pushing it to your phone.
             if not first_run and notice.event not in COVERED_EVENTS:
                 self._dispatch(Alert("notice", 3, notice.title, notice.text or notice.event, notice.url,

@@ -10,13 +10,27 @@ import io
 import json
 import time
 import urllib.parse
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from .deadline import GUARANTEE_SECONDS, parse_time
 from .net import HttpError, request
 
 BOM = chr(0xFEFF)
+PLATFORMS = {"pc", "playstation", "xbox", "switch", "mobile", "android", "ios"}
+
+
+def format_request(fields) -> str:
+    """["PC", "100 herbals"] -> "100 herbals | PC"; ["1", "75", "PC"] -> "1 → 75 | PC"."""
+    clean = [re.sub(r"\s+", " ", str(f or "")).strip() for f in fields or []]
+    clean = [f for f in clean if f]
+    platforms = [f for f in clean if f.lower() in PLATFORMS]
+    rest = [f for f in clean if f.lower() not in PLATFORMS]
+    if len(rest) >= 2 and rest[0].isdigit() and rest[1].isdigit():
+        rest[:2] = [f"{rest[0]} → {rest[1]}"]
+    line = " | ".join(rest + platforms)
+    return line if len(line) <= 240 else line[:239] + "…"
 
 
 @dataclass(frozen=True)
@@ -30,6 +44,14 @@ class Order:
     url: str
     started_at: float | None
     window: int | None  # guaranteed delivery time in seconds, None if the offer has none
+    kind: str = ""        # Eldorado's category title, e.g. "Custom Request" on a request order
+    request_id: str = ""  # boosting and custom requests: the buyer's request behind the order
+
+    def with_request(self, asked: str) -> "Order":
+        """A request order names what the buyer asked for: "Custom Request | 100 herbals | PC"."""
+        if not asked:
+            return self
+        return replace(self, title=f"{self.kind or 'Custom Request'} | {asked}")
 
     @property
     def deadline(self) -> float | None:
@@ -62,6 +84,8 @@ class Order:
             url=f"{base_url}/order/{raw['id']}",
             started_at=parse_time(raw.get("deliveryStartedDate") or raw.get("createdDate")),
             window=GUARANTEE_SECONDS.get(offer.get("guaranteedDeliveryTime")),
+            kind=offer.get("gameCategoryTitle") or "",
+            request_id=offer.get("boostingRequestId") or "",
         )
 
 
@@ -72,6 +96,8 @@ class Notice:
     title: str
     text: str
     url: str | None
+    request_id: str = ""  # BoostingRequestCreated: the request an order will later point to
+    request: str = ""     # what the buyer wrote, formatted by format_request
 
     @classmethod
     def from_api(cls, raw: dict) -> "Notice | None":
@@ -83,9 +109,15 @@ class Notice:
         if not plain.get("id"):
             return None
         details = plain.get("details") or {}
-        bits = [details.get("title"), details.get("gameCategoryTitle"), details.get("buyerUsername")]
+        data = plain.get("customNotificationData") or {}
+        asked = format_request(data.get("requestFields")) if isinstance(data, dict) else ""
+        category = details.get("gameCategoryTitle")
+        if asked:
+            category = f"{category or 'Request'}: {asked}"
+        bits = [details.get("title"), category, details.get("buyerUsername")]
         event = plain.get("event") or "Unknown"
-        return cls(plain["id"], event, event, ", ".join(b for b in bits if b), None)
+        return cls(plain["id"], event, event, ", ".join(b for b in bits if b), None,
+                   (details.get("detailsId") or "") if asked else "", asked)
 
 
 class EldoradoClient:
@@ -124,6 +156,27 @@ class EldoradoClient:
         reply = json.loads(self._call("GET", "/api/v1/orders/me/seller/orders",
                                       {"orderState": state, "pageSize": 50}) or "{}")
         return [Order.from_api(raw, self.base_url) for raw in reply.get("results") or []]
+
+    def find_requests(self, request_ids, pages: int = 4) -> dict[str, str]:
+        """Pages read and unread notifications for the given requests (one status per call)."""
+        wanted, found = set(request_ids), {}
+        for status in ("IsUnread", "IsRead"):
+            cursor = ""
+            for _ in range(pages):
+                if not wanted - set(found):
+                    return found
+                params = {"notificationReadStatuses": status, "pageSize": 50}
+                if cursor:
+                    params.update(pageDirection="Next", cursorValue=cursor)
+                reply = json.loads(self._call("GET", "/api/notifications/me", params) or "{}")
+                rows = reply.get("results") or []
+                for notice in filter(None, (Notice.from_api(raw) for raw in rows)):
+                    if notice.request_id in wanted:
+                        found[notice.request_id] = notice.request
+                cursor = reply.get("nextPageCursor") or ""
+                if not rows or not cursor:
+                    break
+        return found
 
     def unread_notices(self) -> list[Notice]:
         reply = json.loads(self._call("GET", "/api/notifications/me",

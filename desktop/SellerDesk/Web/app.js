@@ -671,7 +671,7 @@ function ordersPage() {
           'data-key': o.id, 'data-do': 'pickOrder', 'data-order': o.id, tabindex: 0,
           class: pick && o.id === pick.id ? 'on' : null, 'aria-selected': String(!!pick && o.id === pick.id),
         },
-          h('td', {}, dueCell(o)), h('td', {}, h('div', { class: 'it' }, orderPicture(o), h('b', {}, o.title))), h('td', {}, o.buyer, buyerNote(o.buyer) ? h('small', { class: 'buyer-tag', title: buyerNote(o.buyer) }, buyerNote(o.buyer)) : null), h('td', {}, o.quantity), h('td', { class: 'each' }, o.each), h('td', {}, o.total),
+          h('td', {}, dueCell(o)), h('td', {}, h('div', { class: 'it' }, orderPicture(o), h('b', { title: o.title }, o.title))), h('td', {}, o.buyer, buyerNote(o.buyer) ? h('small', { class: 'buyer-tag', title: buyerNote(o.buyer) }, buyerNote(o.buyer)) : null), h('td', {}, o.quantity), h('td', { class: 'each' }, o.each), h('td', {}, o.total),
           h('td', {}, o.state), h('td', { class: o.review === 'Negative' ? 'bad' : null }, o.review))))))
         : h('p', { class: 'empty' }, orderFilter.trim() ? `No orders for “${orderFilter.trim()}” here.` : ordersShown === 'open' ? 'Nothing to deliver right now.' : 'Reading your orders.')),
       pick ? orderPanel(pick) : null)];

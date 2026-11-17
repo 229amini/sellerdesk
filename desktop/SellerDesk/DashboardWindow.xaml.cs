@@ -668,6 +668,8 @@ namespace SellerDesk
                     var open = market.OpenOrders();
                     var recent = recentPass ? market.RecentOrders(DateTime.UtcNow.AddDays(-HistoryDays * 2)) : null;
                     var unread = market.Notices();
+                    // Request orders get the buyer's own words as their title (a missed one costs a few reads).
+                    market.BackfillRequests(recent == null ? open : open.Concat(recent).ToList(), recentPass ? 20 : 1);
                     Post(() => TakeOrders(open, recent, unread));
                     if (recentPass) FetchSales(salesDays);
                     ReadLedger();

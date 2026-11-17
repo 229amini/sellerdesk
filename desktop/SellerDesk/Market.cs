@@ -89,6 +89,20 @@ namespace SellerDesk
         public string Dispute = "";
         public string Cancelled = "";   // Eldorado's reason, when the order was cancelled
         public string Category = "";    // Currency or an item category, which sets Eldorado's fee
+        public string RequestId = "";   // boosting and custom requests: the buyer's request behind the order
+        public string Request = "";     // what the buyer wrote, e.g. "100 herbals | PC"
+
+        /// <summary>A request order shows what the buyer asked for: "Custom Request | 100 herbals | PC".</summary>
+        public SoldOrder Retitle()
+        {
+            var asked = Requests.Find(RequestId);
+            if (asked.Length > 0 && Request.Length == 0)
+            {
+                Request = asked;
+                Title = (Kind.Length > 0 && Kind != "Other" ? Kind : "Custom Request") + " | " + asked;
+            }
+            return this;
+        }
 
         public bool IsOpen => State == "Paid" || State == "Disputed";
         public bool IsSale => State != "Canceled";
@@ -419,7 +433,8 @@ namespace SellerDesk
                 Dispute = dispute == null ? "" : Text(dispute, "reason").Replace('_', ' '),
                 Cancelled = cancelled == null ? "" : Text(cancelled, "reason"),
                 Category = Text(offer, "category"),
-            };
+                RequestId = Text(offer, "boostingRequestId"),
+            }.Retitle();
         }
 
         private static DateTime? Moment(string text) =>
@@ -508,7 +523,75 @@ namespace SellerDesk
                 ["notificationReadStatuses"] = "IsUnread",
                 ["pageSize"] = "30",
             }, true);
-            return List(reply, "results").Select(ToNotice).Where(n => n != null).ToList();
+            var results = List(reply, "results").ToList();
+            Requests.Harvest(results);
+            return results.Select(ToNotice).Where(n => n != null).ToList();
+        }
+
+        /// <summary>
+        /// Reads read and unread notifications for buyer requests the unread poll missed. The request comes a
+        /// few minutes before its order and Eldorado sends ~200 requests a day, so this pages back only until
+        /// it passes the oldest order still missing one; a request not found by then is not looked for again.
+        /// </summary>
+        public void BackfillRequests(IEnumerable<SoldOrder> orders, int maxPages = 4)
+        {
+            var list = orders.ToList();
+            var waiting = list.Where(o => o.RequestId.Length > 0 && !Requests.Has(o.RequestId))
+                .GroupBy(o => o.RequestId).Select(g => g.First()).ToList();
+            if (waiting.Count == 0)
+            {
+                foreach (var order in list) order.Retitle();
+                return;
+            }
+            var missing = waiting.Select(o => o.RequestId).ToList();
+            var target = waiting.Min(o => o.Placed).AddHours(-2);
+            var reached = new List<DateTime>();
+            // The filter takes one status per call (a comma list answers only the first).
+            foreach (var status in new[] { "IsUnread", "IsRead" })
+            {
+                var cursor = "";
+                var oldest = DateTime.MaxValue;
+                for (var page = 0; page < maxPages && missing.Count > 0; page++)
+                {
+                    var query = new Dictionary<string, string>
+                    {
+                        ["notificationReadStatuses"] = status,
+                        ["pageSize"] = "50",
+                    };
+                    if (cursor.Length > 0)
+                    {
+                        query["pageDirection"] = "Next";
+                        query["cursorValue"] = cursor;
+                    }
+                    var reply = Read("/api/notifications/me", query, true);
+                    var results = List(reply, "results").ToList();
+                    Requests.Harvest(results);
+                    missing.RemoveAll(Requests.Has);
+                    foreach (var row in results)
+                    {
+                        var when = Moment(Text(Part(row, "notification") ?? Part(row, "customNotification") ?? row, "notificationDate"));
+                        if (when.HasValue && when.Value < oldest) oldest = when.Value;
+                    }
+                    cursor = Text(reply, "nextPageCursor");
+                    if (results.Count == 0 || cursor.Length == 0)
+                    {
+                        oldest = DateTime.MinValue;   // this status has nothing older
+                        break;
+                    }
+                    if (oldest < target) break;
+                }
+                reached.Add(oldest);
+            }
+            // Both lists read back past an order's time: its request is gone, so stop asking for it. A deep
+            // search that ran out of pages gives up on the rest too: new notifications only push them further.
+            if (maxPages >= 20) Requests.GiveUp(missing);
+            else if (reached.Count == 2)
+            {
+                var covered = reached.Max();
+                Requests.GiveUp(waiting.Where(o => missing.Contains(o.RequestId) && o.Placed.AddHours(-2) > covered)
+                    .Select(o => o.RequestId));
+            }
+            foreach (var order in list) order.Retitle();
         }
 
         private static Notice ToNotice(Dictionary<string, object> raw)

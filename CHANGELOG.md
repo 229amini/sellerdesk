@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.0
+
+- Custom request and boosting orders now show what the buyer asked for, in their own words: "Custom Request | 100 herbals | PC" or "Power Leveling | 1 → 75 | PC". Eldorado only names the category on the order, so SellerDesk takes the text from the request the buyer sent before ordering.
+- The text shows in Orders, the side panel and every alert (phone, chat apps, your own alert server). A long request is cut short in the list; the side panel shows all of it.
+- On first start SellerDesk looks back through your notifications for older request orders. That takes about half a minute once.
+
 ## 1.9.0
 
 - Settings has a new **Alerts** tab. Turn all SellerDesk alerts off, or pick the kinds you want: new order, deadline, dispute, boosting, Eldorado news, connection and other events.
