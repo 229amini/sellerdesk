@@ -29,8 +29,17 @@ log = logging.getLogger("sellerdesk")
 RECEIVED = "/api/boostingOffers/me/boostingRequests/received"
 ONE = "/api/boostingOffers/boostingRequests/{}"
 OFFERS = "/api/boostingOffers"
-KEEP = 300                 # requests kept on disk, newest first
+KEEP = 300                 # closed requests kept on disk, newest first
 KEEP_HOURS = 72
+LIFE_HOURS = 7 * 24        # Eldorado keeps a request open for a week
+KEEP_OPEN = 1500           # open requests kept, a safety cap only
+KEEP_MARKS = 2000          # hidden and skipped ids
+FORGET = 5000              # closed requests dropped from disk, remembered so the back read skips them
+PAGE = 30                  # the most `received` gives per page
+BACKFILL_SECONDS = 600     # how often the whole `received` list is walked for requests the desk never read
+BACKFILL_PAGES = 20
+BACKLOG_PER_PASS = 4       # of those, read per pass, so new requests stay quick
+SHOW_CLOSED = 150          # closed requests sent to the dashboard besides every open one
 REFRESH_SECONDS = 60       # how often a request you offered on is read again
 CHECK_SECONDS = 180        # how often a young open request is read again, to drop the closed ones
 OLD_CHECK_SECONDS = 900    # the same for one over an hour old
@@ -439,6 +448,8 @@ class RequestDesk:
         self._stop = threading.Event()
         self._offers: list = []
         self._offers_read = 0.0
+        self._backfilled = 0.0
+        self._backlog: list[dict] = []
         self.problem = ""
         self.last_poll = None
         self.data = self._load()
@@ -446,7 +457,7 @@ class RequestDesk:
     # --- storage ---
 
     def _load(self) -> dict:
-        data = {"settings": default_settings(), "requests": {}, "hidden": [], "skipped": []}
+        data = {"settings": default_settings(), "requests": {}, "hidden": [], "skipped": [], "forgotten": []}
         try:
             with open(self.path, encoding="utf-8") as file:
                 saved = json.load(file)
@@ -462,9 +473,9 @@ class RequestDesk:
                 log.error("requests: saved settings refused (%s); using the defaults", error)
             if isinstance(saved.get("requests"), dict):
                 data["requests"] = {k: v for k, v in saved["requests"].items() if isinstance(v, dict)}
-            for key in ("hidden", "skipped"):
+            for key, cap in (("hidden", KEEP_MARKS), ("skipped", KEEP_MARKS), ("forgotten", FORGET)):
                 if isinstance(saved.get(key), list):
-                    data[key] = [h for h in saved[key] if isinstance(h, str)][-KEEP:]
+                    data[key] = [h for h in saved[key] if isinstance(h, str)][-cap:]
         return data
 
     def _save(self) -> None:
@@ -478,10 +489,21 @@ class RequestDesk:
             os.fsync(file.fileno())
         os.replace(fresh, self.path)
 
+    def _is_open(self, row: dict) -> bool:
+        now = self.clock()
+        return (row.get("state") == "Active" and row.get("created", 0) >= now - LIFE_HOURS * 3600
+                and not (row.get("expires") and row["expires"] <= now))
+
     def _trim(self) -> None:
+        """An open request stays for its whole week; the cap and the 72 hours apply to closed ones only.
+        Before, 300 rows were about 22 hours of requests, so a day-old open one fell off the list."""
         cutoff = self.clock() - KEEP_HOURS * 3600
         rows = sorted(self.data["requests"].values(), key=lambda r: r.get("created", 0), reverse=True)
-        keep = {r["id"] for r in rows[:KEEP] if r.get("created", 0) >= cutoff}
+        keep = {r["id"] for r in [r for r in rows if self._is_open(r)][:KEEP_OPEN]}
+        keep |= {r["id"] for r in [r for r in rows if not self._is_open(r)][:KEEP] if r.get("created", 0) >= cutoff}
+        dropped = [k for k in self.data["requests"] if k not in keep]
+        if dropped:
+            self.data["forgotten"] = (self.data.setdefault("forgotten", []) + dropped)[-FORGET:]
         self.data["requests"] = {k: v for k, v in self.data["requests"].items() if k in keep}
 
     # --- reads for the dashboard ---
@@ -503,7 +525,9 @@ class RequestDesk:
             "simulated": sum(1 for r in today if (r.get("mine") or {}).get("by") == "simulate"),
             "won": sum(1 for r in today if (r.get("mine") or {}).get("state") == "OfferWon"),
         }
-        return {"settings": data["settings"], "requests": rows[:200], "stats": stats,
+        shown = {r["id"] for r in rows if self._is_open(r)}
+        shown |= {r["id"] for r in [r for r in rows if r["id"] not in shown][:SHOW_CLOSED]}
+        return {"settings": data["settings"], "requests": [r for r in rows if r["id"] in shown], "stats": stats,
                 "checked": self.last_poll, "problem": self.problem or None,
                 "deliveryTimes": list(DELIVERY_TIMES), "kinds": list(KINDS)}
 
@@ -530,7 +554,7 @@ class RequestDesk:
             ids = [h for h in self.data[key] if h != request_id]
             if on:
                 ids.append(request_id)
-            self.data[key] = ids[-KEEP:]
+            self.data[key] = ids[-KEEP_MARKS:]
             self._save()
 
     # --- one request ---
@@ -717,9 +741,62 @@ class RequestDesk:
             log.warning("requests: could not read your offers: %s", error)
             self._offers_read = self.clock() - OFFERS_EVERY + 60
 
+    def _backfill(self) -> None:
+        """Walks the whole `received` list (newest first, `cursorValue` pages) for open requests the desk never
+        read: the ones sent before it started, or while the server was down. They are read a few per pass."""
+        now = self.clock()
+        if now - self._backfilled < BACKFILL_SECONDS:
+            return
+        self._backfilled = now
+        with self._lock:
+            skip = set(self.data["requests"]) | set(self.data.get("forgotten") or [])
+        oldest = now - LIFE_HOURS * 3600
+        found, cursor = {}, None
+        try:
+            for _ in range(BACKFILL_PAGES):
+                query = {"pageSize": str(PAGE)}
+                if cursor:
+                    query["cursorValue"] = cursor
+                reply = self.api.signed_read(RECEIVED, query)
+                rows = [r for r in (reply.get("results") or []) if isinstance(r, dict) and r.get("id")]
+                for row in rows:
+                    if row["id"] not in skip and parse_time(row.get("createdDate")) >= oldest:
+                        found.setdefault(row["id"], row)
+                cursor = reply.get("nextPageCursor")
+                if not rows or not cursor or parse_time(rows[-1].get("createdDate")) < oldest:
+                    break
+        except MarketError as error:
+            log.warning("requests: could not walk the request list: %s", error)
+            self._backfilled = now - BACKFILL_SECONDS + 120
+        if found:
+            log.info("requests: %d older requests to read", len(found))
+        self._backlog = list(found.values())
+
+    def _read_backlog(self) -> bool:
+        """A few of the older requests. They don't go to the auto sender: it answers new requests only."""
+        reads = 0
+        while self._backlog and reads < BACKLOG_PER_PASS:
+            raw = self._backlog.pop(0)
+            with self._lock:
+                if raw["id"] in self.data["requests"]:
+                    continue
+            reads += 1
+            try:
+                fresh = self._read_one(raw["id"], raw)
+            except MarketError as error:
+                if error.status == 404:
+                    with self._lock:
+                        self.data["forgotten"] = (self.data.setdefault("forgotten", []) + [raw["id"]])[-FORGET:]
+                else:
+                    log.warning("requests: could not read %s: %s", raw["id"], error)
+                continue
+            with self._lock:
+                self._merge(fresh)
+        return reads > 0
+
     def poll(self) -> None:
         self._refresh_offers()
-        listed = self.api.signed_read(RECEIVED, {"pageSize": "30"})
+        listed = self.api.signed_read(RECEIVED, {"pageSize": str(PAGE)})
         rows = [r for r in (listed.get("results") or []) if isinstance(r, dict) and r.get("id")]
         with self._lock:
             known = set(self.data["requests"])
@@ -744,6 +821,8 @@ class RequestDesk:
                         self.data["requests"][raw["id"]]["mine"]["error"] = str(error)[:200]
                     log.warning("requests: auto offer on %s failed: %s", raw["id"], error)
             changed = True
+        self._backfill()
+        changed = self._read_backlog() or changed
         now = self.clock()
         with self._lock:
             skipped = set(self.data["skipped"]) | set(self.data["hidden"])

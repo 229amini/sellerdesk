@@ -151,8 +151,11 @@ class FakeApi:
 
     def signed_read(self, path, query=None):
         if path.endswith("/received"):
-            return {"results": [{"id": rid, "createdDate": r["createdDate"], "buyerUsername": "amy"}
-                                for rid, r in self.requests.items()]}
+            rows = [{"id": rid, "createdDate": r["createdDate"], "buyerUsername": "amy"}
+                    for rid, r in self.requests.items()]
+            size, start = int((query or {}).get("pageSize", 1000)), int((query or {}).get("cursorValue") or 0)
+            more = start + size < len(rows)
+            return {"results": rows[start:start + size], "nextPageCursor": str(start + size) if more else None}
         rid = path.rsplit("/", 1)[-1]
         if rid not in self.requests:
             raise MarketError("gone", 404)
@@ -293,6 +296,29 @@ class Desk(unittest.TestCase):
         self.assertTrue({r["id"]: r for r in again.snapshot()["requests"]}["pl1"]["skipped"])
         self.desk.skip("pl1", False)
         self.assertFalse({r["id"]: r for r in self.desk.snapshot()["requests"]}["pl1"]["skipped"])
+
+    def test_older_pages_are_read_too(self):
+        for n in range(40):
+            self.api.requests[f"old{n}"] = raw_request("Trials", [("Request description", f"trial {n}")])
+        self.desk.set_settings({"mode": "live"})
+        for _ in range(12):
+            self.desk.poll()
+        ids = {r["id"] for r in self.desk.snapshot()["requests"]}
+        self.assertEqual(len(ids), 42)                          # page 1 holds 30; the rest come from the back read
+        self.assertEqual(len([w for w in self.api.writes if w[0] == "POST"]), 1)   # only pl1, a new one, auto-sent
+
+    def test_open_requests_outlive_the_closed_cap(self):
+        now = self.desk.clock()
+        rows = {f"c{n}": {"id": f"c{n}", "state": "Bought", "created": now - n} for n in range(400)}
+        rows["open"] = {"id": "open", "state": "Active", "created": now - 50 * 3600}
+        rows["week"] = {"id": "week", "state": "Active", "created": now - 8 * 24 * 3600}
+        self.desk.data["requests"] = rows
+        self.desk._trim()
+        kept = self.desk.data["requests"]
+        self.assertIn("open", kept)                             # two days old and open: still shown
+        self.assertNotIn("week", kept)                          # past Eldorado's week
+        self.assertEqual(len(kept), 301)
+        self.assertIn("c399", self.desk.data["forgotten"])      # the back read won't read it again
 
     def test_saved_and_reloaded(self):
         self.desk.set_settings({"mode": "simulate"})

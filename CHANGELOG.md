@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1
+
+- The Requests tab now shows every open request from the past week. Before, it lost requests older than about a day, so after a while away you saw only the ones that came in since.
+- The server reads the whole request list every 10 minutes and adds the open requests it missed, a few at a time. Live never sends an offer on these older ones by itself.
+- The fix is on the server. The desktop app has no changes.
+
 ## 1.12.0
 
 - New **Requests** tab. Your server reads the boosting and custom requests buyers post, prices each one from your rules, and lets you send, change or withdraw an offer from the card.
