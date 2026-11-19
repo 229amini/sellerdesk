@@ -102,6 +102,16 @@ Open orders and the last 30 days, with each item's picture, buyer, quantity, pri
 
 Write a note on a buyer in the order's side panel, like "big orders" or "slow to reply". You'll see it under their name in Orders and Customers, and on the alarm when they order again. Notes need your shared server and every PC shares them.
 
+### Requests
+
+Buyers post boosting and custom requests that every seller of the game can answer. Your shared server reads them every 10 seconds, prices each one from your rules and lists it here. The tab needs the shared server.
+
+Each card shows what the buyer asked for, your price and the delivery time. Click **Send offer** to answer at that price, or click the price to type your own. Once your offer is out you can change it or withdraw it. **Edit prices and rules** sets your price per level range, per million coins, or from your item offers for custom requests.
+
+Start in **Simulate**: your server prices every new request and sends nothing, and **Sent** shows what it would have sent. **Go Live** sends real offers by itself, only for the kinds of request you turned Auto on for.
+
+**Skip** moves a request you don't want out of **To answer** into **Skipped**, and Live leaves it alone. **Undo skip** brings it back. **Hide (spam)** does the same for spam. When a buyer buys a request from you or someone else, your server closes it and it drops out of To answer.
+
 ### Sales
 
 ![The Sales tab: totals, a daily chart, best sellers and items worth bringing back](assets/app-sales.png)

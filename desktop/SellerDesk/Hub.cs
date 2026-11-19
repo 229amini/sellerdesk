@@ -83,6 +83,30 @@ namespace SellerDesk
         public Dictionary<string, object> SetBuyerNote(string buyer, string note) =>
             Call("PUT", "/api/ledger/buyers/" + Uri.EscapeDataString(buyer), new Dictionary<string, object> { ["note"] = note });
 
+        /// <summary>The request desk: requests your server read and priced, its settings and today's counts.</summary>
+        public Dictionary<string, object> Requests() => Call("GET", "/api/requests", null);
+
+        public Dictionary<string, object> SaveRequestSettings(Dictionary<string, object> settings) =>
+            Call("PUT", "/api/requests/settings", settings);
+
+        /// <summary>Sends your offer, or changes the one already out. message null uses your saved message.</summary>
+        public Dictionary<string, object> SendRequestOffer(string id, double price, string delivery, string message)
+        {
+            var body = new Dictionary<string, object> { ["price"] = price };
+            if (!string.IsNullOrEmpty(delivery)) body["delivery"] = delivery;
+            if (message != null) body["message"] = message;
+            return Call("POST", "/api/requests/" + Uri.EscapeDataString(id) + "/offer", body);
+        }
+
+        public Dictionary<string, object> WithdrawRequestOffer(string id) =>
+            Call("DELETE", "/api/requests/" + Uri.EscapeDataString(id) + "/offer", null);
+
+        public Dictionary<string, object> HideRequest(string id, bool hidden) =>
+            Call("PUT", "/api/requests/" + Uri.EscapeDataString(id) + "/hidden", new Dictionary<string, object> { ["hidden"] = hidden });
+
+        public Dictionary<string, object> SkipRequest(string id, bool skipped) =>
+            Call("PUT", "/api/requests/" + Uri.EscapeDataString(id) + "/skipped", new Dictionary<string, object> { ["skipped"] = skipped });
+
         private Dictionary<string, object> Call(string method, string path, object body, long? seen = null)
         {
             var request = (HttpWebRequest)WebRequest.Create(url + path);

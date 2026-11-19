@@ -123,6 +123,7 @@ namespace SellerDesk
         {
             clock.Start();
             new Thread(Watch) { IsBackground = true, Name = "market" }.Start();
+            StartRequests();
             new Thread(WatchUpdates) { IsBackground = true, Name = "updates" }.Start();
             try
             {
@@ -245,6 +246,7 @@ namespace SellerDesk
                 ["customers"] = recentRead ? Customers.Build(orders.Values, DateTime.UtcNow) : null,
                 ["hub"] = hub != null,
                 ["finance"] = FinanceToWeb(),
+                ["requests"] = RequestsToWeb(),
                 ["zoom"] = Math.Round(web.ZoomFactor * 100),
                 ["version"] = Updater.Current.ToString(),
                 ["update"] = update == null || (updateHidden && updatePercent == null) ? null : new Dictionary<string, object>
@@ -389,6 +391,7 @@ namespace SellerDesk
             string Text(string key) => message.TryGetValue(key, out var value) ? Convert.ToString(value, CultureInfo.InvariantCulture) ?? "" : "";
             var row = rows.FirstOrDefault(r => r.Offer.Id == Text("id"));
             var direction = message.TryGetValue("dir", out var dir) ? Convert.ToInt32(dir, CultureInfo.InvariantCulture) : 0;
+            if (HandleRequests(Text("type"), Text, message)) return;
             if (HandleFinance(Text("type"), Text, message)) return;
 
             switch (Text("type"))

@@ -238,7 +238,7 @@ function choice(attrs, items, value) {
 function topBar() {
   const open = openOrders().length;
   const unassigned = state.finance && state.finance.ready ? sales90().filter(o => leftOf(o) > UNIT_EPS).length : null;
-  const tabs = [['home', 'Home', null], ['offers', 'Offers', state.offers.filter(isLive).length], ['orders', 'Orders', open], ['sales', 'Sales', null], ['customers', 'Customers', null], ['finance', 'Finance', unassigned], ['insights', 'Insights', null]];
+  const tabs = [['home', 'Home', null], ['offers', 'Offers', state.offers.filter(isLive).length], ['orders', 'Orders', open], ['requests', 'Requests', reqCount()], ['sales', 'Sales', null], ['customers', 'Customers', null], ['finance', 'Finance', unassigned], ['insights', 'Insights', null]];
   return h('header', { class: 'top' },
     h('b', { class: 'name', title: state.version ? 'SellerDesk ' + state.version : 'SellerDesk' }, h('span', { class: 'mark' }, logo()), h('span', { class: 'label' }, 'SellerDesk')),
     h('nav', { role: 'tablist', 'aria-label': 'Sections' },
@@ -1350,7 +1350,7 @@ function financePage() {
 
 // ---------- drawing ----------
 
-const PAGES = { home: homePage, offers: offersPage, orders: ordersPage, sales: salesPage, customers: customersPage, finance: financePage, insights: insightsPage };
+const PAGES = { home: homePage, offers: offersPage, orders: ordersPage, requests: requestsPage, sales: salesPage, customers: customersPage, finance: financePage, insights: insightsPage };
 
 function draw() {
   document.body.dataset.theme = state.theme === 'light' ? 'light' : 'dark';
@@ -1385,6 +1385,7 @@ function editMessage(node, kind) {
 const CLICKS = {
   tab(target) {
     tab = target.dataset.value;
+    send('tab', { value: tab });   // the app reads requests faster while that tab is open
     bulk = null;
     draw();
   },
@@ -1632,6 +1633,632 @@ const CLICKS = {
   },
 };
 
+// ---------- requests ----------
+
+// The boosting and custom requests buyers send. Your server reads and prices them, and sends offers by itself
+// in Live mode; this tab shows what came in, what each would cost, and lets you answer any one by hand.
+// Layout and setup follow Voltstrike's request bot: a state column, a feed of cards whose offer is changed in
+// place, and a quick setup of plain questions that starts from a price sheet instead of empty boxes.
+let reqShown = 'open';      // open | sent | skipped | all | spam
+let reqSetup = null;        // a working copy of the server's settings while Quick setup is open
+let reqStandard = {};       // per kind, the "Standard" sheet the presets scale: your sold prices, else your current ones
+let reqSetupError = '';
+let reqAskLive = false;     // Live waits for a second click
+let reqEditing = '';        // the card whose offer row is open
+const reqDraft = {};        // request id -> { price, delivery }
+
+const reqData = () => (state.requests && state.requests.data) || null;
+const reqNow = () => Date.now() / 1000;
+const reqOpen = r => r.state === 'Active' && !r.spam && !r.hidden && !r.skipped;
+const reqSkipped = r => !!r.skipped && !r.spam && !r.hidden;
+const reqSent = r => !!(r.mine && r.mine.offerId);
+const reqWon = r => !!(r.mine && r.mine.state === 'OfferWon');
+const reqToAnswer = r => reqOpen(r) && !reqSent(r) && !reqWon(r);
+const reqCount = () => { const d = reqData(); return d ? d.requests.filter(reqToAnswer).length : null; };
+const DELIVERY_LABELS = { Minute20: '20 min', Hour1: '1 hour', Hour2: '2 hours', Hour3: '3 hours', Hour5: '5 hours', Hour8: '8 hours', Hour12: '12 hours', Day1: '1 day', Day2: '2 days', Day3: '3 days', Day5: '5 days', Day7: '7 days', Day10: '10 days', Day14: '14 days' };
+const deliveryLabel = code => DELIVERY_LABELS[code] || code || '';
+const deliveryCodes = () => (reqData() || {}).deliveryTimes || Object.keys(DELIVERY_LABELS);
+const deliveryChoices = (extra) => (extra ? [['', extra]] : []).concat(deliveryCodes().map(k => [k, deliveryLabel(k)]));
+const deliveryMinutes = code => { const m = /^(Minute|Hour|Day)(\d+)$/.exec(code || ''); return m ? Number(m[2]) * { Minute: 1, Hour: 60, Day: 1440 }[m[1]] : 0; };
+const cents = v => String(Math.round(v * 100) / 100);
+const typedNumber = v => (typeof v === 'number' ? v : Number(String(v).replace(',', '.')));
+const typed = v => String(v == null ? '' : v).trim() !== '' && Number.isFinite(typedNumber(v));
+const pricedKinds = settings => Object.entries(settings.categories).filter(([name, rule]) => name !== 'Raids' && rule.kind !== 'review');
+const yourKinds = settings => Object.entries(settings.categories).filter(([name, rule]) => name !== 'Raids' && rule.kind === 'review').map(([name]) => name);
+
+function reqAge(r) {
+  const minutes = Math.max(0, Math.round((reqNow() - r.created) / 60));
+  return minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.floor(minutes / 60)} h ago` : `${Math.floor(minutes / 1440)} d ago`;
+}
+
+function reqList() {
+  const d = reqData();
+  if (!d) return [];
+  const rows = d.requests;
+  if (reqShown === 'open') return rows.filter(reqToAnswer);
+  if (reqShown === 'sent') return rows.filter(r => reqSent(r) || reqWon(r) || (r.mine && r.mine.by === 'simulate'));
+  if (reqShown === 'skipped') return rows.filter(reqSkipped);
+  if (reqShown === 'spam') return rows.filter(r => r.spam || r.hidden);
+  return rows.filter(r => !r.spam && !r.hidden);
+}
+
+const fieldOf = (r, label) => { const f = (r.fields || []).find(([k]) => k.toLowerCase() === label); return f ? f[1] : ''; };
+
+function reqLevels(r) {
+  const from = parseInt(fieldOf(r, 'current level'), 10);
+  const to = parseInt(fieldOf(r, 'desired level'), 10);
+  return Number.isFinite(from) && Number.isFinite(to) ? `${from} → ${to}` : '';
+}
+
+// ---------- the request card ----------
+
+function reqChips(r) {
+  const mine = r.mine || {};
+  const q = r.quote || {};
+  if (reqWon(r)) return h('span', { class: 'pill up' }, 'Won');
+  if (reqSent(r)) return h('span', { class: 'pill up' }, mine.by === 'auto' ? '✓ Sent by itself' : '✓ Offer sent');
+  if (r.spam) return h('span', { class: 'pill warn' }, 'Spam');
+  if (r.state && r.state !== 'Active') return h('span', { class: 'pill quiet' }, r.state === 'Gone' ? 'Gone' : r.state === 'Bought' ? 'Bought' : 'Closed');
+  if (r.skipped) return h('span', { class: 'pill quiet' }, 'Skipped');
+  if (q.price == null) return h('span', { class: 'pill warn' }, q.kind === 'review' ? 'Read it' : 'No price');
+  return q.sure ? null : h('span', { class: 'pill warn' }, 'Check it');
+}
+
+// "Your offer $2.40 · 20 min ✎": the offer, or the price waiting to go, and a click opens the row to change it.
+function reqOfferChip(r) {
+  const mine = r.mine || {};
+  const q = r.quote || {};
+  const open = r.state === 'Active' && !r.spam;
+  let label;
+  if (reqSent(r) || reqWon(r)) label = [h('small', {}, 'Your offer'), h('b', {}, dollars(Number(mine.price))), mine.delivery ? ' · ' + deliveryLabel(mine.delivery) : ''];
+  else if (mine.by === 'simulate') label = [h('small', {}, 'Would send'), h('b', {}, dollars(Number(mine.price))), mine.delivery ? ' · ' + deliveryLabel(mine.delivery) : ''];
+  else if (q.price != null) label = [h('small', {}, 'Your price'), h('b', {}, dollars(q.price)), q.delivery ? ' · ' + deliveryLabel(q.delivery) : ''];
+  else label = [h('small', {}, 'Set a price')];
+  if (!open || reqWon(r)) return h('span', { class: 'offer-chip still' }, label);
+  return h('button', { type: 'button', class: reqEditing === r.id ? 'offer-chip on' : 'offer-chip', 'data-do': 'reqEdit', 'data-id': r.id, 'aria-expanded': String(reqEditing === r.id), title: 'Change price and delivery time' },
+    label, h('span', { class: 'pen', 'aria-hidden': 'true' }, '✎'));
+}
+
+function reqFacts(r) {
+  const skip = new Set(['platform', 'completion method', 'request description', 'provide any additional information', 'current level', 'desired level']);
+  const facts = r.fields.filter(([label]) => !skip.has(label.toLowerCase()));
+  const said = r.fields.filter(([label]) => ['request description', 'provide any additional information'].includes(label.toLowerCase())).map(([, v]) => v);
+  return [
+    facts.length || r.platform ? h('div', { class: 'req-facts' },
+      facts.map(([label, value]) => h('span', {}, h('small', {}, label), ' ', h('b', {}, value))),
+      r.platform ? h('span', {}, h('small', {}, 'Platform'), ' ', h('b', {}, r.platform)) : null) : null,
+    said.length ? h('blockquote', { class: 'req-said' }, `“${said.join(' · ')}”`) : null,
+  ];
+}
+
+function reqDefaults(r) {
+  const mine = r.mine || {};
+  const q = r.quote || {};
+  const price = mine.offerId && mine.price != null ? String(mine.price) : q.price != null ? String(q.price) : '';
+  const delivery = mine.offerId && mine.delivery ? mine.delivery : q.delivery || (reqData().settings || {}).delivery || 'Minute20';
+  return { price, delivery };
+}
+
+function reqEditRow(r) {
+  const draft = reqDraft[r.id] || (reqDraft[r.id] = {});
+  const base = reqDefaults(r);
+  const price = draft.price !== undefined ? draft.price : base.price;
+  const delivery = draft.delivery !== undefined ? draft.delivery : base.delivery;
+  return h('div', { class: 'req-edit', 'data-key': 'e' + r.id },
+    h('span', { class: 'quiet' }, reqSent(r) ? 'Change your offer' : 'Send your own offer'),
+    h('label', { class: 'req-price' }, '$', h('input', { 'data-req': 'price', 'data-id': r.id, value: price, inputmode: 'decimal', placeholder: 'price', autocomplete: 'off', 'aria-label': 'Your price in USD' })),
+    choice({ 'data-req': 'delivery', 'data-id': r.id, 'aria-label': 'Delivery time' }, deliveryChoices(), delivery),
+    h('span', { class: 'grow' }),
+    h('button', { type: 'button', class: 'solid', 'data-do': 'reqSend', 'data-id': r.id, disabled: state.requests.busy || !typed(price) }, reqSent(r) ? 'Update offer' : 'Send offer'),
+    h('button', { type: 'button', class: 'line', 'data-do': 'reqEditCancel' }, 'Cancel'));
+}
+
+function reqCard(r) {
+  const q = r.quote || {};
+  const mine = r.mine || {};
+  const open = r.state === 'Active' && !r.spam;
+  const basis = q.kind === 'levels' || /^levels /.test(q.basis || '') ? '' : q.basis;   // the title already says 1 → 75
+  const quick = open && !reqSent(r) && !reqWon(r) && q.price != null && reqEditing !== r.id;
+  const cls = ['req', reqWon(r) ? 'won' : reqSent(r) ? 'sent' : '', r.state !== 'Active' ? 'closed' : ''].filter(Boolean).join(' ');
+  return h('article', { class: cls, 'data-key': 'r' + r.id },
+    h('div', { class: 'req-head' },
+      h('div', { class: 'req-title' }, h('b', {}, r.category || 'Request', reqLevels(r) ? ` ${reqLevels(r)}` : ''),
+        h('small', { class: 'quiet' }, `${r.game} · ${reqAge(r)}`)),
+      h('div', { class: 'req-right' }, reqChips(r), reqOfferChip(r))),
+    reqFacts(r),
+    basis || q.why ? h('p', { class: 'req-quote' },
+      basis ? h('span', { class: 'quiet' }, basis) : null,
+      q.why ? h('span', { class: q.price != null ? 'warn-text' : 'quiet' }, (basis ? ' · ' : '') + q.why) : null) : null,
+    h('div', { class: 'req-buyer quiet' },
+      h('span', { class: 'avatar', 'aria-hidden': 'true' }, (r.buyer || '?').slice(0, 1).toUpperCase()),
+      h('b', {}, r.buyer), buyerNote(r.buyer) ? h('small', { class: 'buyer-tag' }, buyerNote(r.buyer)) : null,
+      h('span', {}, plural(r.buyerOrders || 0, 'review')),
+      r.sellers ? h('span', {}, `${r.sellers} sellers can see this`) : null,
+      r.viewers ? h('span', {}, `${r.viewers} looking`) : null,
+      reqSent(r) ? h('span', { class: 'up-text' }, 'offer sent ✓') : null),
+    mine.error ? h('p', { class: 'note bad' }, mine.error) : null,
+    reqEditing === r.id && open ? reqEditRow(r) : null,
+    h('div', { class: 'req-act' },
+      quick ? h('button', { type: 'button', class: 'solid', 'data-do': 'reqSend', 'data-id': r.id, 'data-quick': '1', disabled: state.requests.busy },
+        `Send offer ${dollars(q.price)}`) : null,
+      open && !reqSent(r) && !reqWon(r) && q.price == null && reqEditing !== r.id
+        ? h('button', { type: 'button', class: 'solid', 'data-do': 'reqEdit', 'data-id': r.id }, 'Type a price') : null,
+      h('button', { type: 'button', class: 'line', 'data-do': 'reqOpenSite', 'data-url': `/boosting-request/${r.id}` }, 'Open on Eldorado'),
+      reqSent(r) && open ? h('button', { type: 'button', class: 'line', 'data-do': 'reqWithdraw', 'data-id': r.id }, 'Withdraw offer') : null,
+      open && !reqSent(r) && !reqWon(r) || r.skipped
+        ? h('button', { type: 'button', class: 'line', 'data-do': 'reqSkip', 'data-id': r.id, 'data-skipped': String(!r.skipped) }, r.skipped ? 'Undo skip' : 'Skip') : null,
+      r.blocked ? h('span', { class: 'quiet' }, 'Blocked') : h('button', { type: 'button', class: 'line danger', 'data-do': 'reqBlock', 'data-buyer': r.buyer }, 'Block buyer'),
+      h('button', { type: 'button', class: 'line', 'data-do': 'reqHide', 'data-id': r.id, 'data-hidden': String(!r.hidden) }, r.hidden ? 'Show again' : 'Hide (spam)')));
+}
+
+// ---------- the state column ----------
+
+function rulePriced(rule) {
+  if (rule.kind === 'levels') return (rule.bands || []).length > 0;
+  if (rule.kind === 'coins') return rule.perMillion > 0;
+  if (rule.kind === 'flat') return rule.flat > 0;
+  return rule.kind === 'items';
+}
+
+const MODE_TEXT = {
+  off: ['Off', 'Nothing goes out by itself. You answer each request from its card.'],
+  simulate: ['Simulating', 'Your server prices every new request and sends nothing. What it would have sent shows under Sent.'],
+  live: ['Live', 'Real offers go out to buyers the moment a request you priced comes in.'],
+};
+
+function reqStatus(d) {
+  const mode = d.settings.mode;
+  const kinds = pricedKinds(d.settings);
+  const priced = kinds.filter(([, rule]) => rulePriced(rule)).length;
+  const auto = kinds.filter(([, rule]) => rule.auto && rulePriced(rule)).map(([name]) => name);
+  const [title, text] = MODE_TEXT[mode] || MODE_TEXT.off;
+  const button = (cls, value, label) => h('button', { type: 'button', class: cls, 'data-do': 'reqMode', 'data-value': value }, label);
+  const big = (value, label) => h('div', {}, h('b', {}, value), h('small', {}, label));
+  return h('section', { class: 'req-status' },
+    h('div', { class: `state-card ${mode}` },
+      h('div', { class: 'state-title' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('b', {}, title)),
+      h('p', {}, text),
+      h('div', { class: 'acts' },
+        mode === 'off' ? [button('solid', 'simulate', 'Try it in Simulate'), button('line', 'live', 'Go Live')]
+          : mode === 'simulate' ? [button('solid', 'live', 'Go Live'), button('line', 'off', 'Turn off')]
+            : [button('line', 'simulate', 'Back to simulation'), button('line', 'off', 'Pause')])),
+    reqAskLive ? h('div', { class: 'confirm' },
+      h('p', {}, auto.length ? `Offers go out by themselves for ${auto.join(', ')}, at your prices.` : 'No kind of request has Auto on yet, so nothing goes out. Turn it on in Quick setup, step 5.'),
+      h('div', { class: 'acts' }, h('button', { type: 'button', class: 'solid', 'data-do': 'reqLive' }, 'Turn Live on'), h('button', { type: 'button', class: 'line', 'data-do': 'reqLiveCancel' }, 'Cancel'))) : null,
+    h('div', { class: 'big-numbers' },
+      big(d.stats.seen - d.stats.spam, 'requests today'),
+      big(mode === 'simulate' ? d.stats.simulated : d.stats.sent, mode === 'simulate' ? 'would send' : 'offers sent'),
+      big(d.stats.won, 'won')),
+    h('div', { class: 'setup-card' },
+      h('b', {}, 'Your prices'),
+      h('p', { class: priced ? 'quiet' : 'warn-text' }, `${priced} of ${kinds.length} kinds have a price · Auto on for ${auto.length}`),
+      h('button', { type: 'button', class: priced ? 'line' : 'solid', 'data-do': 'reqSetup' }, priced ? 'Edit prices and rules' : 'Set your prices')),
+    d.problem ? h('p', { class: 'note bad' }, d.problem) : null,
+    h('p', { class: 'note', role: 'status' }, state.requests.note),
+    h('p', { class: 'quiet how' }, h('b', {}, 'How it works: '),
+      'Eldorado shows every seller the requests buyers post. Your server reads them every 10 seconds and prices them from your rules; in Live it sends the offer too. ',
+      `${yourKinds(d.settings).join(', ')} always wait for you.`));
+}
+
+// ---------- quick setup ----------
+
+// Orders you already sold for this kind of request, newest first: the prices a buyer said yes to.
+function reqPastSales(name) {
+  const word = name.toLowerCase();
+  return state.orders.filter(o => o.sale && (o.title || '').toLowerCase().startsWith(word))
+    .sort((a, b) => b.placed - a.placed).slice(0, 6).map(o => {
+      const asked = Object.fromEntries((o.asked || []).map(([k, v]) => [k.toLowerCase(), v]));
+      const from = parseInt(asked['current level'], 10);
+      const to = parseInt(asked['desired level'], 10);
+      const total = parseFloat(o.total);
+      const levels = Number.isFinite(from) && Number.isFinite(to) && to > from;
+      const what = levels ? `${from} → ${to}` : (o.title.split('|')[1] || '').trim();
+      return { from: levels ? from : 0, to: levels ? to : 0, total, text: `${what ? what + ' ' : ''}${dollars(total)}` };
+    });
+}
+
+const LEVEL_DEFAULTS = { 'Power Leveling': [25, 50, 75] };
+const MARKUP_CHOICES = [['-10', '10% cheaper than my offers'], ['0', 'Same price as my offers'], ['10', '10% more than my offers']];
+const PRESETS = [
+  ['value', 'Value', 'Undercut. You win more of the requests you bid on.', 0.85, -10],
+  ['standard', 'Standard', 'What buyers already paid you. The safest place to start.', 1, 0],
+  ['premium', 'Premium', 'Fewer jobs, better pay. For when your reviews carry you.', 1.15, 10],
+];
+
+// The server keeps a price per level ("up to level 75, $0.03 each"); people think in a price per range
+// ("1 to 75: $2.40"). Setup edits ranges and turns them back into per-level prices on Save.
+function rangesOf(name, bands) {
+  if (bands && bands.length) {
+    let from = 1;
+    return bands.map(b => {
+      const row = { to: String(b.upTo), total: cents(b.each * Math.max(0, b.upTo - from)) };
+      from = b.upTo;
+      return row;
+    });
+  }
+  const top = Math.max(0, ...reqPastSales(name).map(x => x.to));
+  return (LEVEL_DEFAULTS[name] || [top || '']).map(to => ({ to: String(to), total: '' }));
+}
+
+function rangeStarts(ranges) {
+  let from = 1;
+  return ranges.map(r => { const start = from; if (typed(r.to)) from = Math.round(typedNumber(r.to)); return start; });
+}
+
+// What a request from level a to b costs with these ranges, or null when a level has no price.
+function rangePrice(ranges, a, b) {
+  const starts = rangeStarts(ranges);
+  let total = 0;
+  for (let level = a + 1; level <= b; level++) {
+    const i = ranges.findIndex((r, k) => typed(r.to) && typed(r.total) && level > starts[k] && level <= typedNumber(r.to));
+    if (i < 0) return null;
+    total += typedNumber(ranges[i].total) / (typedNumber(ranges[i].to) - starts[i]);
+  }
+  return total;
+}
+
+function ruleReady(rule) {
+  if (rule.kind === 'levels') return rule.ranges.some(r => typed(r.to) && typed(r.total) && typedNumber(r.total) > 0);
+  if (rule.kind === 'coins') return typedNumber(rule.perMillion) > 0;
+  if (rule.kind === 'flat') return typedNumber(rule.flat) > 0;
+  return rule.kind === 'items';
+}
+
+// The Standard sheet: for levels, the per-level price buyers paid you spread over your ranges; anything you
+// never sold keeps the price it has now.
+function standardSheet(settings) {
+  const out = {};
+  for (const [name, rule] of pricedKinds(settings)) {
+    if (rule.kind === 'levels') {
+      const sold = reqPastSales(name).filter(x => x.to > x.from && x.total > 0);
+      const perLevel = sold.length ? sold.reduce((sum, x) => sum + x.total / (x.to - x.from), 0) / sold.length : 0;
+      let from = 1;
+      out[name] = { ranges: rule.ranges.map(r => {
+        const to = typed(r.to) ? Math.round(typedNumber(r.to)) : 0;
+        const total = perLevel && to > from ? cents(perLevel * (to - from)) : r.total;
+        if (to) from = to;
+        return { to: r.to, total };
+      }) };
+    } else out[name] = { perMillion: rule.perMillion, flat: rule.flat };
+  }
+  return out;
+}
+
+function applyPreset(key) {
+  const [, , , factor, markup] = PRESETS.find(p => p[0] === key);
+  for (const [name, rule] of pricedKinds(reqSetup)) {
+    const base = reqStandard[name] || {};
+    if (rule.kind === 'levels') rule.ranges = base.ranges.map(r => ({ to: r.to, total: typed(r.total) ? cents(typedNumber(r.total) * factor) : r.total }));
+    else if (rule.kind === 'coins') rule.perMillion = typedNumber(base.perMillion) > 0 ? cents(typedNumber(base.perMillion) * factor) : rule.perMillion;
+    else if (rule.kind === 'flat') rule.flat = typedNumber(base.flat) > 0 ? cents(typedNumber(base.flat) * factor) : rule.flat;
+    else if (rule.kind === 'items') rule.markup = String(markup);
+  }
+  reqSetup.preset = key;
+}
+
+function adjustAll(factor) {
+  for (const [, rule] of pricedKinds(reqSetup)) {
+    if (rule.kind === 'levels') rule.ranges = rule.ranges.map(r => ({ to: r.to, total: typed(r.total) ? cents(typedNumber(r.total) * factor) : r.total }));
+    else if (rule.kind === 'coins' && typedNumber(rule.perMillion) > 0) rule.perMillion = cents(typedNumber(rule.perMillion) * factor);
+    else if (rule.kind === 'flat' && typedNumber(rule.flat) > 0) rule.flat = cents(typedNumber(rule.flat) * factor);
+    else if (rule.kind === 'items') rule.markup = String(Math.max(-90, Math.min(500, (typedNumber(rule.markup) || 0) + (factor > 1 ? 10 : -10))));
+  }
+  reqSetup.preset = '';
+}
+
+// "Power Leveling 1 → 75 would go out at $2.40, ready in 3 hours": the sheet as a buyer meets it.
+function setupExample() {
+  for (const [name, rule] of pricedKinds(reqSetup)) {
+    if (rule.kind !== 'levels') continue;
+    const sold = reqPastSales(name).find(x => x.to > x.from);
+    const tops = rule.ranges.filter(r => typed(r.to)).map(r => Math.round(typedNumber(r.to)));
+    const [a, b] = sold ? [sold.from, sold.to] : tops.length ? [1, Math.max(...tops)] : [0, 0];
+    if (!b) continue;
+    const price = rangePrice(rule.ranges, a, b);
+    if (price == null) continue;
+    return { name, levels: `${a} → ${b}`, price: Math.max(price, typedNumber(reqSetup.minPrice) || 0), delivery: deliveryFor(rule, Math.max(1, Math.ceil((b - a) / 25))), sold };
+  }
+  return null;
+}
+
+// Same rule as the server: a kind's own time, else yours; "auto" gives a bigger job the time of `size` jobs.
+function deliveryFor(rule, size) {
+  if (rule.delivery) return rule.delivery;
+  if (reqSetup.deliveryMode !== 'auto' || size <= 1) return reqSetup.delivery;
+  const want = deliveryMinutes(reqSetup.delivery) * size;
+  return deliveryCodes().find(code => deliveryMinutes(code) >= want) || deliveryCodes().slice(-1)[0];
+}
+
+function ruleEditor(name, rule) {
+  if (rule.kind === 'levels') {
+    const starts = rangeStarts(rule.ranges);
+    return h('div', { class: 'ranges' },
+      rule.ranges.map((r, i) => h('div', { class: 'range-row', 'data-key': `c${name}r${i}` },
+        h('span', { class: 'from' }, `${starts[i]} →`),
+        h('input', { 'data-rule': 'to', 'data-cat': name, 'data-i': i, value: r.to, inputmode: 'numeric', 'aria-label': `${name}, range ${i + 1}: up to level` }),
+        h('span', { class: 'from' }, '$'),
+        h('input', { 'data-rule': 'total', 'data-cat': name, 'data-i': i, value: r.total, inputmode: 'decimal', placeholder: '0.00', 'aria-label': `${name}, range ${i + 1}: price in USD` }),
+        rule.ranges.length > 1 ? h('button', { type: 'button', class: 'link', 'data-do': 'reqRangeDrop', 'data-cat': name, 'data-i': i, 'aria-label': `Remove range ${i + 1}` }, '×') : h('span', {}))),
+      h('button', { type: 'button', class: 'link', 'data-do': 'reqRangeAdd', 'data-cat': name }, '+ Add a range'));
+  }
+  if (rule.kind === 'coins') {
+    return h('label', { class: 'one' }, '$ for 1 million coins', h('input', { 'data-rule': 'perMillion', 'data-cat': name, value: rule.perMillion || '', inputmode: 'decimal', placeholder: '0.00' }));
+  }
+  if (rule.kind === 'items') {
+    const m = String(typedNumber(rule.markup) || 0);
+    const items = MARKUP_CHOICES.some(([k]) => k === m) ? MARKUP_CHOICES : MARKUP_CHOICES.concat([[m, `${Number(m) > 0 ? '+' : ''}${m}% from my offers`]]);
+    return h('label', { class: 'one' }, 'Your offers × the count asked', choice({ 'data-rule': 'markup', 'data-cat': name }, items, m));
+  }
+  return h('label', { class: 'one' }, 'Price, $', h('input', { 'data-rule': 'flat', 'data-cat': name, value: rule.flat || '', inputmode: 'decimal' }));
+}
+
+const KIND_NOTE = { levels: 'Whole price for each range of levels', coins: 'Read from what the buyer typed', items: 'Matched to your own offers', flat: 'One price for every request' };
+
+function priceTile(name, rule) {
+  const past = reqPastSales(name);
+  const ready = ruleReady(rule);
+  return h('div', { class: ready ? 'tile' : 'tile empty', 'data-key': 't' + name },
+    h('div', { class: 'tile-head' }, h('b', {}, name), ready ? null : h('small', { class: 'warn-text' }, 'No price yet')),
+    h('small', { class: 'quiet' }, KIND_NOTE[rule.kind] || ''),
+    ruleEditor(name, rule),
+    past.length ? h('small', { class: 'quiet sold' }, 'You sold: ' + past.slice(0, 3).map(x => x.text).join(' · ')) : null,
+    h('label', { class: 'one small' }, 'Delivery', choice({ 'data-rule': 'delivery', 'data-cat': name }, deliveryChoices('Your time, step 2'), rule.delivery || '')));
+}
+
+function step(n, title, help, ...body) {
+  return h('section', { class: 'step', 'aria-labelledby': `step${n}` },
+    h('div', { class: 'step-num', 'aria-hidden': 'true' }, String(n)),
+    h('div', { class: 'step-body' }, h('h3', { id: `step${n}` }, title), help ? h('p', { class: 'quiet' }, help) : null, body));
+}
+
+function reqSetupPanel() {
+  const s = reqSetup;
+  const kinds = pricedKinds(s);
+  const ready = kinds.filter(([, rule]) => ruleReady(rule));
+  const autoOn = kinds.filter(([, rule]) => rule.auto && ruleReady(rule));
+  const example = setupExample();
+  const sample = (s.message || '').replace(/\{buyer\}/g, 'amy').replace(/\{price\}/g, example ? dollars(example.price) : '$2.40')
+    .replace(/\{delivery\}/g, deliveryLabel(example ? example.delivery : s.delivery)).replace(/\{game\}/g, 'Arc Raiders').replace(/\{request\}/g, example ? example.levels : '1 → 75');
+  const mode = s.deliveryMode === 'auto' ? 'auto' : 'fixed';
+  return h('div', { class: 'req-setup qs' },
+    h('div', { class: 'head' },
+      h('div', {}, h('h2', {}, 'Quick setup'), h('p', { class: 'quiet' }, 'Five short questions. Nothing here is final: change any price later, or on a single request card.')),
+      h('button', { type: 'button', class: 'link', 'data-do': 'reqSetup' }, 'Close')),
+
+    step(1, 'How much do you charge?', 'Pick a starting point and every price fills in. Then fine-tune any of them.',
+      h('div', { class: 'presets', role: 'radiogroup', 'aria-label': 'Starting prices' }, PRESETS.map(([key, label, text]) => h('button', {
+        type: 'button', role: 'radio', 'aria-checked': String(s.preset === key), class: s.preset === key ? 'preset on' : 'preset', 'data-do': 'reqPreset', 'data-value': key,
+      }, key === 'standard' ? h('small', { class: 'tag' }, 'Recommended') : null, h('b', {}, label), h('span', {}, text), h('span', { class: 'use' }, 'Use this →')))),
+      example ? h('p', { class: 'example' }, `Example: ${example.name} ${example.levels} would go out at `, h('b', {}, dollars(example.price)),
+        example.sold ? h('span', { class: 'quiet' }, ` (you sold it for ${dollars(example.sold.total)})`) : null) : null,
+      h('div', { class: 'tiles-head' }, h('b', {}, 'Your prices'),
+        h('span', { class: 'adjust' }, h('small', { class: 'quiet' }, 'Adjust all'),
+          h('button', { type: 'button', class: 'line', 'data-do': 'reqAdjust', 'data-value': '0.9' }, '−10%'),
+          h('button', { type: 'button', class: 'line', 'data-do': 'reqAdjust', 'data-value': '1.1' }, '+10%'))),
+      h('div', { class: 'tiles' }, kinds.map(([name, rule]) => priceTile(name, rule)))),
+
+    step(2, 'How fast do you deliver?', 'Eldorado asks every offer for a delivery promise.',
+      h('div', { class: 'radios' },
+        h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'reqDeliveryMode', 'data-rule': 'deliveryMode', 'data-cat': '', value: 'auto', checked: mode === 'auto' }),
+          h('span', {}, h('b', {}, 'Automatic, by the size of the job'), h('small', { class: 'quiet' }, ' (recommended)'), h('br', {}),
+            h('small', { class: 'quiet' }, 'A small job gets your time below. Every 25 levels or 1 million coins counts as one more.'))),
+        h('label', { class: 'radio' }, h('input', { type: 'radio', name: 'reqDeliveryMode', 'data-rule': 'deliveryMode', 'data-cat': '', value: 'fixed', checked: mode === 'fixed' }),
+          h('span', {}, h('b', {}, 'Always the same time'), h('br', {}), h('small', { class: 'quiet' }, 'Careful with big jobs.')))),
+      h('label', { class: 'one' }, mode === 'auto' ? 'Your time for a small job' : 'Always promise', choice({ 'data-rule': 'delivery', 'data-cat': '' }, deliveryChoices(), s.delivery)),
+      example ? h('p', { class: 'example' }, `${example.name} ${example.levels} would promise `, h('b', {}, deliveryLabel(example.delivery)), '.') : null,
+      h('small', { class: 'quiet' }, 'One kind needs its own time? Set it on its price in step 1. You can also change the time on any single card.')),
+
+    step(3, 'What should it say to the buyer?', 'Sent with your offer. Keep it short and human. Leave it empty to send no message.',
+      h('textarea', { 'data-rule': 'message', 'data-cat': '', rows: 3, maxlength: 500, 'aria-label': 'Message sent with each offer', placeholder: 'Hi {buyer}! I can do {request} for {price}, ready in {delivery}.' }, s.message || ''),
+      h('div', { class: 'tokens' }, ['{buyer}', '{request}', '{price}', '{delivery}', '{game}'].map(t => h('button', { type: 'button', class: 'pill', 'data-do': 'reqToken', 'data-value': t, title: 'Add to the message' }, t))),
+      sample ? h('div', { class: 'buyer-sees' }, h('small', {}, 'Buyer sees'), h('p', {}, sample)) : null),
+
+    step(4, 'Which requests do you answer?', 'Requests outside these never get an offer by themselves.',
+      h('div', { class: 'chips' }, h('small', { class: 'quiet' }, 'Platforms'),
+        ['PC', 'PlayStation', 'Xbox'].map(p => h('label', { class: 'chip' }, h('input', { type: 'checkbox', 'data-rule': 'platform', 'data-cat': '', 'data-value': p, checked: s.platforms.includes(p) }), p))),
+      h('label', { class: 'one' }, 'Never offer under, $', h('input', { 'data-rule': 'minPrice', 'data-cat': '', value: s.minPrice, inputmode: 'decimal' })),
+      s.blocked.length ? h('div', { class: 'chips' }, h('small', { class: 'quiet' }, 'Blocked buyers'),
+        s.blocked.map(b => h('button', { type: 'button', class: 'pill', 'data-do': 'reqUnblock', 'data-buyer': b, title: 'Unblock' }, b, ' ×'))) : null),
+
+    step(5, 'Which ones go out by themselves?', 'Only while Auto offers is Live, and only when the price is sure. A kind needs a price first.',
+      h('div', { class: 'autos' }, kinds.map(([name, rule]) => {
+        const ok = ruleReady(rule);
+        return h('label', { class: ok ? 'switch' : 'switch off', title: ok ? '' : 'Set a price in step 1 first' },
+          h('input', { type: 'checkbox', 'data-rule': 'auto', 'data-cat': name, checked: !!rule.auto && ok, disabled: !ok }), name);
+      })),
+      h('small', { class: 'quiet' }, `${yourKinds(s).join(', ')}: every request is different, so they wait for you on their card.`)),
+
+    h('div', { class: 'setup-bar' },
+      h('div', {}, h('b', {}, `Auto on for ${autoOn.length} of ${kinds.length} kinds`), h('small', { class: 'quiet' }, `${ready.length} of ${kinds.length} have a price`)),
+      reqSetupError ? h('p', { class: 'note bad', role: 'alert' }, reqSetupError) : null,
+      h('div', { class: 'acts' }, h('button', { type: 'button', class: 'line', 'data-do': 'reqSetup' }, 'Cancel'),
+        h('button', { type: 'button', class: 'solid', 'data-do': 'reqSave', disabled: state.requests.busy }, 'Save'))));
+}
+
+function requestsPage() {
+  if (!state.hub) {
+    return h('div', { class: 'empty setup' },
+      h('h2', {}, 'Requests need your server'),
+      h('p', {}, 'Settings, Eldorado key, Shared server.'),
+      h('button', { type: 'button', class: 'solid', 'data-do': 'settings' }, 'Open Settings'));
+  }
+  const d = reqData();
+  if (!d) return h('p', { class: 'empty' }, (state.requests && state.requests.note) || 'Reading requests from your server.');
+  if (reqSetup) return h('div', { class: 'req-setup-page scroll' }, reqSetupPanel());
+  const all = d.requests;
+  const counts = { open: all.filter(reqToAnswer).length, sent: all.filter(r => reqSent(r) || reqWon(r) || (r.mine && r.mine.by === 'simulate')).length, skipped: all.filter(reqSkipped).length, spam: all.filter(r => r.spam || r.hidden).length };
+  const list = reqList();
+  return h('div', { class: 'work req-work' },
+    h('aside', { class: 'req-side scroll', 'aria-label': 'Auto offers' }, reqStatus(d)),
+    h('div', { class: 'list' },
+      h('div', { class: 'bar' }, h('h2', { class: 'feed-title' }, 'Incoming requests'),
+        segment('Show requests', [['open', `To answer ${counts.open}`], ['sent', `Sent ${counts.sent}`], ['skipped', `Skipped ${counts.skipped}`], ['all', 'All'], ['spam', `Spam and hidden ${counts.spam}`]], reqShown, 'reqShown'),
+        h('span', { class: 'quiet' }, d.checked ? `Checked ${ago(Date.parse(d.checked))} ago` : 'First check is running')),
+      list.length ? h('div', { class: 'scroll reqs' }, list.map(reqCard))
+        : h('p', { class: 'empty' }, reqShown === 'open' ? 'Nothing waiting. New requests show up here within seconds.' : 'Nothing here.')));
+}
+
+function reqRuleOf(cat) { return cat ? reqSetup.categories[cat] : reqSetup; }
+
+Object.assign(CLICKS, {
+  reqShown(target) {
+    reqShown = target.dataset.value;
+    draw();
+  },
+  reqMode(target) {
+    const mode = target.dataset.value;
+    if (mode === 'live' && reqData().settings.mode !== 'live') {
+      reqAskLive = true;
+      draw();
+      return;
+    }
+    reqAskLive = false;
+    send('reqSettings', { settings: { mode } });
+  },
+  reqLive() {
+    reqAskLive = false;
+    send('reqSettings', { settings: { mode: 'live' } });
+  },
+  reqLiveCancel() {
+    reqAskLive = false;
+    draw();
+  },
+  reqSetup() {
+    reqSetupError = '';
+    if (reqSetup) reqSetup = null;
+    else {
+      reqSetup = JSON.parse(JSON.stringify(reqData().settings));
+      reqSetup.deliveryMode = reqSetup.deliveryMode || 'fixed';
+      for (const [name, rule] of Object.entries(reqSetup.categories)) if (rule.kind === 'levels') rule.ranges = rangesOf(name, rule.bands);
+      reqStandard = standardSheet(reqSetup);
+      reqSetup.preset = '';
+    }
+    draw();
+  },
+  reqPreset(target) {
+    applyPreset(target.dataset.value);
+    draw();
+  },
+  reqAdjust(target) {
+    adjustAll(Number(target.dataset.value));
+    draw();
+  },
+  reqToken(target) {
+    const text = reqSetup.message || '';
+    reqSetup.message = (text && !/\s$/.test(text) ? text + ' ' : text) + target.dataset.value;
+    draw();
+  },
+  reqSave() {
+    const s = reqSetup;
+    const num = v => typedNumber(v);
+    const categories = {};
+    for (const [name, rule] of Object.entries(s.categories)) {
+      let bands = rule.bands || [];
+      if (rule.ranges) {
+        const rows = rule.ranges.filter(r => String(r.to).trim() !== '' || String(r.total).trim() !== '');
+        bands = [];
+        let from = 1;
+        for (const r of rows) {
+          const to = Math.round(num(r.to));
+          const fail = text => { reqSetupError = `${name}: ${text}`; draw(); };
+          if (!typed(r.to) || to <= from) return fail(`each range has to end above level ${from}.`);
+          if (!typed(r.total) || num(r.total) < 0) return fail(`put a price on levels ${from} → ${to}.`);
+          bands.push({ upTo: to, each: Math.round(num(r.total) / (to - from) * 1e4) / 1e4 });
+          from = to;
+        }
+      }
+      const ok = rule.kind !== 'review' && ruleReady(rule);
+      categories[name] = {
+        auto: !!rule.auto && ok, delivery: rule.delivery || '', perMillion: num(rule.perMillion) || 0, flat: num(rule.flat) || 0,
+        markup: num(rule.markup) || 0, bands,
+      };
+    }
+    reqSetupError = '';
+    send('reqSettings', { settings: { delivery: s.delivery, deliveryMode: s.deliveryMode === 'auto' ? 'auto' : 'fixed', message: s.message || '', minPrice: num(s.minPrice) || 0, platforms: s.platforms, categories } });
+    reqSetup = null;
+    draw();
+  },
+  reqRangeAdd(target) {
+    const rule = reqSetup.categories[target.dataset.cat];
+    const last = rule.ranges.length ? Number(rule.ranges[rule.ranges.length - 1].to) || 0 : 0;
+    rule.ranges.push({ to: last ? String(last + 25) : '', total: '' });
+    reqSetup.preset = '';
+    draw();
+  },
+  reqRangeDrop(target) {
+    reqSetup.categories[target.dataset.cat].ranges.splice(Number(target.dataset.i), 1);
+    draw();
+  },
+  reqUnblock(target) {
+    reqSetup.blocked = reqSetup.blocked.filter(b => b !== target.dataset.buyer);
+    send('reqSettings', { settings: { blocked: reqSetup.blocked } });
+    draw();
+  },
+  reqBlock(target) {
+    const blocked = reqData().settings.blocked.concat([target.dataset.buyer]);
+    send('reqSettings', { settings: { blocked } });
+  },
+  reqEdit(target) {
+    reqEditing = reqEditing === target.dataset.id ? '' : target.dataset.id;
+    draw();
+  },
+  reqEditCancel() {
+    if (reqEditing) delete reqDraft[reqEditing];
+    reqEditing = '';
+    draw();
+  },
+  reqSend(target) {
+    const r = reqData().requests.find(x => x.id === target.dataset.id);
+    if (!r) return;
+    const base = reqDefaults(r);
+    const draft = target.dataset.quick ? {} : reqDraft[r.id] || {};
+    send('reqOffer', { id: r.id, price: draft.price !== undefined ? draft.price : base.price, delivery: draft.delivery !== undefined ? draft.delivery : base.delivery });
+    delete reqDraft[r.id];
+    reqEditing = '';
+  },
+  reqOpenSite(target) {
+    send('openUrl', { url: target.dataset.url });
+  },
+  reqWithdraw(target) {
+    send('reqWithdraw', { id: target.dataset.id });
+  },
+  reqHide(target) {
+    send('reqHide', { id: target.dataset.id, hidden: target.dataset.hidden });
+  },
+  reqSkip(target) {
+    if (reqEditing === target.dataset.id) reqEditing = '';
+    send('reqSkip', { id: target.dataset.id, skipped: target.dataset.skipped });
+  },
+});
+
+// Typing in a request card or in Quick setup only changes the local draft; Save or Send sends it.
+function reqInput(node) {
+  if (node.dataset.req) {
+    editing = node;
+    const draft = reqDraft[node.dataset.id] || (reqDraft[node.dataset.id] = {});
+    draft[node.dataset.req] = node.dataset.req === 'price' ? node.value.replace(',', '.').replace(/[^\d.]/g, '') : node.value;
+    if (node.dataset.req === 'price' && draft.price !== node.value) node.value = draft.price;
+    if (node.dataset.req === 'price') {
+      const button = node.closest('.req-edit').querySelector('[data-do=reqSend]');
+      if (button) button.disabled = state.requests.busy || !typed(draft.price);
+    }
+    return true;
+  }
+  if (node.dataset.rule && reqSetup) {
+    const rule = reqRuleOf(node.dataset.cat);
+    const key = node.dataset.rule;
+    if (key === 'to' || key === 'total') rule.ranges[Number(node.dataset.i)][key] = node.value;
+    else if (key === 'auto') rule.auto = node.checked;
+    else if (key === 'platform') reqSetup.platforms = node.checked ? reqSetup.platforms.concat([node.dataset.value]) : reqSetup.platforms.filter(p => p !== node.dataset.value);
+    else rule[key] = node.value;
+    if (['to', 'total', 'perMillion', 'flat', 'markup'].includes(key)) reqSetup.preset = '';
+    if (node.type !== 'checkbox' && node.type !== 'radio' && node.tagName !== 'SELECT') editing = node;
+    draw();
+    return true;
+  }
+  return false;
+}
+
 document.addEventListener('click', event => {
   const target = event.target.closest('[data-do]');
   if (!target) return;
@@ -1642,6 +2269,7 @@ document.addEventListener('click', event => {
 
 document.addEventListener('input', event => {
   const node = event.target;
+  if (reqInput(node)) return;
   if (node.dataset.filter) {
     filter = node.value;
     draw();

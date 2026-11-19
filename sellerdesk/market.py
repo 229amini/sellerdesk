@@ -467,6 +467,15 @@ class MarketApi:
             self._token_expires = self._clock() + life - 60
             return self._token
 
+    # --- any signed call, for the request desk ---
+
+    def signed_read(self, path: str, query: dict | None = None) -> dict:
+        return self._read(path, query or {}, True)
+
+    def signed_write(self, method: str, path: str, body: dict | None = None) -> str:
+        """One write with the seller token. Never repeated: a write that may have landed must not go twice."""
+        return self._call(method, path, None if body is None else json.dumps(body), True)
+
     # --- your offers ---
 
     def offers(self) -> list[Offer]:

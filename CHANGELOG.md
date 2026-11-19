@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.0
+
+- New **Requests** tab. Your server reads the boosting and custom requests buyers post, prices each one from your rules, and lets you send, change or withdraw an offer from the card.
+- **Simulate** prices every new request and sends nothing. **Live** sends offers by itself, only for the kinds of request you switched Auto on for. Both start off.
+- **Edit prices and rules** walks you through your prices: a total per level range, a price per million coins, or your own item prices plus or minus 10% for custom requests. The delivery time can grow with the size of the job.
+- **Skip** a request you don't want. It moves to the **Skipped** list and Live leaves it alone.
+- A request a buyer already bought now closes and leaves To answer. Before, an older one stayed open and Eldorado refused your offer with "state: Bought".
+- The server needs 1.12.0 too.
+
 ## 1.11.0
 
 - Finance takes part of a unit. Split a one-unit custom order 70/30 between two people, or give someone 1.5 of a 3-unit order.

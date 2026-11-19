@@ -55,6 +55,10 @@ class Settings:
     g2g_webhook_url: str = ""          # exactly as typed on G2G's API Integration page; it is part of the signature
     g2g_file: str = "/data/g2g-events.jsonl"
 
+    requests_enabled: bool = True
+    requests_poll_seconds: int = 10   # how often the boosting request list is read
+    requests_file: str = "/data/requests.json"
+
     @classmethod
     def from_env(cls, env=None) -> "Settings":
         env = os.environ if env is None else env
@@ -99,4 +103,7 @@ class Settings:
             g2g_webhook_secret=get("G2G_WEBHOOK_SECRET"),
             g2g_webhook_url=get("G2G_WEBHOOK_URL"),
             g2g_file=get("G2G_FILE") or os.path.join(os.path.dirname(state_file), "g2g-events.jsonl"),
+            requests_enabled=_bool(get("REQUESTS_ENABLED", "true")),
+            requests_poll_seconds=max(5, int(get("REQUESTS_POLL_SECONDS", "10"))),
+            requests_file=get("REQUESTS_FILE") or os.path.join(os.path.dirname(state_file), "requests.json"),
         )

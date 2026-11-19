@@ -16,6 +16,7 @@ from .engine import Engine, load_state, save_state
 from .g2g import G2GInbox
 from .ledger import Ledger
 from .market import MarketApi, MarketHub
+from .requests import RequestDesk
 
 log = logging.getLogger("sellerdesk")
 
@@ -42,9 +43,15 @@ def run(settings: Settings) -> None:
     g2g = None
     if settings.g2g_webhook_secret and settings.g2g_webhook_url and settings.g2g_user_id:
         g2g = G2GInbox(settings.g2g_file, settings.g2g_webhook_url, settings.g2g_user_id, settings.g2g_webhook_secret)
+    desk = None
+    if settings.requests_enabled:
+        # Its own token and call gate: a burst of requests must not wait behind a market sweep.
+        desk_api = MarketApi(settings.base_url, settings.client_id, settings.client_secret)
+        desk = RequestDesk(desk_api, settings.requests_file, settings.requests_poll_seconds)
+        desk.start()
     if settings.dashboard_port:
         dashboard.start(engine, settings.dashboard_host, settings.dashboard_port, settings.dashboard_token,
-                        market=hub, ledger=ledger, g2g=g2g)
+                        market=hub, ledger=ledger, g2g=g2g, desk=desk)
     engine.run(save=lambda state: save_state(settings.state_file, state))
 
 

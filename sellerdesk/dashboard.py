@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .ledger import Conflict, NotFound
-from .market import empty_snapshot
+from .market import MarketError, empty_snapshot
 
 log = logging.getLogger("sellerdesk")
 STATIC = Path(__file__).parent / "static"
@@ -32,7 +32,7 @@ class BadRequest(Exception):
         self.status = status
 
 
-def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
+def make_handler(engine, token: str, market=None, ledger=None, g2g=None, desk=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "SellerDesk"
         timeout = REQUEST_TIMEOUT
@@ -141,6 +141,15 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
                     self._json(200, engine.alert_prefs())
                 else:
                     self._send(401, b'{"error":"token required"}')
+            elif path == "/api/requests":
+                if not self._shared():
+                    return
+                if not self._authorized():
+                    self._send(401, b'{"error":"token required"}')
+                elif desk is None:
+                    self._error(404, "the request desk is turned off on the server")
+                else:
+                    self._json(200, desk.snapshot())
             elif path in ("/api/state", "/api/market", "/api/ledger"):
                 if path != "/api/state" and not self._shared():
                     return
@@ -184,6 +193,11 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
             elif path == "/api/ledger/payments":
                 self._ledger(lambda body: ledger.add_payment(body))
                 return
+            elif re.fullmatch(r"/api/requests/[\w-]+/offer", path):
+                request_id = path.split("/")[3]
+                self._desk(lambda body: desk.send(request_id, body.get("price"), body.get("delivery") or None,
+                                                  body.get("message"), by="you"))
+                return
             else:
                 self._send(404, b'{"error":"not found"}')
                 return
@@ -196,7 +210,15 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
             order = re.fullmatch(r"/api/ledger/orders/([\w-]+)", self._path)
             cost = re.fullmatch(r"/api/ledger/costs/([\w-]+)", self._path)
             buyer = re.fullmatch(r"/api/ledger/buyers/([^/]+)", self._path)
-            if self._path == "/api/alerts":
+            hidden = re.fullmatch(r"/api/requests/([\w-]+)/hidden", self._path)
+            skipped = re.fullmatch(r"/api/requests/([\w-]+)/skipped", self._path)
+            if self._path == "/api/requests/settings":
+                self._desk(lambda body: desk.set_settings(body))
+            elif hidden:
+                self._desk(lambda body: (desk.hide(hidden.group(1), body.get("hidden") is not False), {"ok": True})[1])
+            elif skipped:
+                self._desk(lambda body: (desk.skip(skipped.group(1), body.get("skipped") is not False), {"ok": True})[1])
+            elif self._path == "/api/alerts":
                 try:
                     self._json(200, engine.set_alert_prefs(self._body()))
                 except ValueError as error:
@@ -218,7 +240,10 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
             if not self._may_change():
                 return
             payment = re.fullmatch(r"/api/ledger/payments/([\w-]+)", self._path)
-            if payment:
+            withdraw = re.fullmatch(r"/api/requests/([\w-]+)/offer", self._path)
+            if withdraw:
+                self._desk(lambda body: desk.withdraw(withdraw.group(1)), body=False)
+            elif payment:
                 self._ledger(lambda body: (None, ledger.delete_payment(payment.group(1))), body=False)
             else:
                 self._send(404, b'{"error":"not found"}')
@@ -235,6 +260,29 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
                 return
             status = g2g.receive(self.headers.get("g2g-signature", ""), self.headers.get("g2g-timestamp", ""), raw)
             self._send(status, b'{"ok":true}' if status == 200 else b'{"error":"refused"}')
+
+        def _desk(self, change, body=True):
+            """One request desk action; Eldorado's own refusal goes back to the app word for word."""
+            if not self._shared():
+                return
+            if desk is None:
+                self._error(404, "the request desk is turned off on the server")
+                return
+            try:
+                result = change(self._body() if body else {})
+            except BadRequest as error:
+                self._error(error.status, str(error))
+            except KeyError:
+                self._error(404, "that request isn't on the server; it may have closed")
+            except ValueError as error:
+                self._error(400, str(error))
+            except MarketError as error:
+                self._error(502, str(error))
+            except Exception as error:
+                log.exception("request desk action failed: %s", error)
+                self._error(500, "the request desk could not do that")
+            else:
+                self._json(200, result)
 
         def _ledger(self, change, body=True):
             """Run one ledger change and answer with the stored object plus the new revision."""
@@ -264,8 +312,9 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None):
     return Handler
 
 
-def start(engine, host: str, port: int, token: str, market=None, ledger=None, g2g=None) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(engine, token, market, ledger, g2g))
+def start(engine, host: str, port: int, token: str, market=None, ledger=None, g2g=None,
+          desk=None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), make_handler(engine, token, market, ledger, g2g, desk))
     threading.Thread(target=server.serve_forever, daemon=True, name="dashboard").start()
     if not token:
         log.warning("DASHBOARD_TOKEN is empty: keep port %s bound to localhost; the market and finance API "
