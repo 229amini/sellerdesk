@@ -24,13 +24,39 @@ namespace SellerDesk
         private readonly AutoResetEvent requestsWake = new AutoResetEvent(false);
         private bool requestsStarted;
 
+        private Dictionary<string, object> requestsTrial;
+        private string requestsTrialNote = "";
+        private bool requestsTrying;
+
         private Dictionary<string, object> RequestsToWeb() => new Dictionary<string, object>
         {
             ["ready"] = requestsData != null,
             ["note"] = requestsNote,
             ["busy"] = requestsBusy,
             ["data"] = requestsData,
+            ["trial"] = requestsTrial,
+            ["trialNote"] = requestsTrialNote,
+            ["trying"] = requestsTrying,
         };
+
+        /// <summary>Try: the server judges recent requests with the settings on screen. Nothing is saved or sent.</summary>
+        private async void RequestTry(Dictionary<string, object> settings, Dictionary<string, object> sample)
+        {
+            if (hub == null || requestsTrying) return;
+            requestsTrying = true;
+            requestsTrialNote = "";
+            Later();
+            try
+            {
+                requestsTrial = await Task.Run(() => hub.TryRequests(settings, sample));
+            }
+            catch (MarketError error)
+            {
+                requestsTrialNote = error.Message;
+            }
+            requestsTrying = false;
+            Later();
+        }
 
         /// <summary>Its own loop: requests go stale in minutes, far sooner than the market pass comes round.</summary>
         private void StartRequests()
@@ -76,6 +102,16 @@ namespace SellerDesk
                     var settings = message.TryGetValue("settings", out var raw) ? raw as Dictionary<string, object> : null;
                     if (settings == null) return true;
                     RequestChange(() => hub.SaveRequestSettings(settings), Said(settings));
+                    return true;
+                case "reqTry":
+                    var trySettings = message.TryGetValue("settings", out var rawTry) ? rawTry as Dictionary<string, object> : null;
+                    var sample = message.TryGetValue("sample", out var rawSample) ? rawSample as Dictionary<string, object> : null;
+                    RequestTry(trySettings, sample);
+                    return true;
+                case "reqTryClear":
+                    requestsTrial = null;
+                    requestsTrialNote = "";
+                    Later();
                     return true;
                 case "reqOffer":
                     if (!double.TryParse(text("price").Trim().TrimStart('$'), NumberStyles.Float, CultureInfo.InvariantCulture, out var price) || price <= 0)

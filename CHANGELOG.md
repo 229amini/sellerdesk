@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.13.0
+
+- **Rules** in Edit prices and rules, step 4. Skip a request when the buyer wrote a word you name, or none of the words you need; when the buyer is a verified seller; when their account is new, has few reviews or a low positive score; when they have disputed orders; when your price would be over your limit; or when the same buyer asks the same thing again within a day. Every rule starts off.
+- A request your rules skip moves to **Skipped** with the reason on its card. Live leaves it alone, and you can still answer it by hand.
+- **Try it before you save**, step 6, runs what is on the page over your last 60 requests and shows which would go out by themselves, which a rule skips and which wait for you, with the reason. You can also type a request in and see its price. Nothing is sent or saved.
+- **How?** on a card shows how its price was worked out, one line per level range, item or coin amount, plus the delivery time.
+- A **Server** card on the Requests tab shows how often the server reads requests, failed reads in the last hour, and how many seconds after a buyer posts a request it is seen and an offer goes out.
+- The server asks Eldorado for compressed answers, so each read is about four times smaller.
+- The server needs 1.13.0 too.
+
 ## 1.12.1
 
 - The Requests tab now shows every open request from the past week. Before, it lost requests older than about a day, so after a while away you saw only the ones that came in since.

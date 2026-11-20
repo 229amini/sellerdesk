@@ -89,6 +89,14 @@ namespace SellerDesk
         public Dictionary<string, object> SaveRequestSettings(Dictionary<string, object> settings) =>
             Call("PUT", "/api/requests/settings", settings);
 
+        /// <summary>What these settings would do on recent requests (and on one typed in). Sends and saves nothing.</summary>
+        public Dictionary<string, object> TryRequests(Dictionary<string, object> settings, Dictionary<string, object> sample)
+        {
+            var body = new Dictionary<string, object> { ["settings"] = settings ?? new Dictionary<string, object>() };
+            if (sample != null) body["sample"] = sample;
+            return Call("POST", "/api/requests/try", body);
+        }
+
         /// <summary>Sends your offer, or changes the one already out. message null uses your saved message.</summary>
         public Dictionary<string, object> SendRequestOffer(string id, double price, string delivery, string message)
         {

@@ -5,7 +5,7 @@ import unittest
 
 from sellerdesk.market import MarketError, Offer
 from sellerdesk.requests import (RequestDesk, budget_of, clean_settings, coins_of, default_settings, delivery_for,
-                                 item_name, level_price, match_items, quote)
+                                 item_name, level_price, level_steps, match_items, quote, rule_reason, verdict)
 
 
 def offer(oid, title, price, quantity=10, state="Active"):
@@ -328,6 +328,125 @@ class Desk(unittest.TestCase):
         self.assertEqual(len(again.snapshot()["requests"]), 2)
         with open(self.path, encoding="utf-8") as file:
             self.assertIn("settings", json.load(file))
+
+
+class Rules(unittest.TestCase):
+    def setUp(self):
+        self.settings = clean_settings({"mode": "live", "categories": {
+            "Power Leveling": {"auto": True, "bands": [{"upTo": 20, "each": 0.02}, {"upTo": 75, "each": 0.04}]}}})
+
+    def row(self, text="", **extra):
+        fields = [["Current level", "1"], ["Desired level", "75"]] + ([["Request description", text]] if text else [])
+        values = dict(text=text, created=1_000_000.0, buyerOrders=5, buyerScore=100.0)
+        values.update(extra)
+        r = request("Power Leveling", fields, rid=values.pop("rid", "r1"), **values)
+        r["quote"] = quote(r, self.settings, OFFERS)
+        return r
+
+    def rules(self, **given):
+        self.settings = clean_settings({"rules": given}, self.settings)
+
+    def test_no_rules_skip_nothing(self):
+        self.assertEqual(rule_reason(self.row("fast please"), self.settings), "")
+        self.assertEqual(verdict(self.row(), self.settings), ("send", ""))
+
+    def test_words(self):
+        self.rules(skipWords=["Refund", "elo"])
+        self.assertIn("refund", rule_reason(self.row("no refund pls"), self.settings))
+        self.assertEqual(rule_reason(self.row("my elometer"), self.settings), "")      # whole words by default
+        self.rules(wholeWords=False)
+        self.assertIn("elo", rule_reason(self.row("my elometer"), self.settings))
+        self.rules(skipWords=[], needWords=["ranked"])
+        self.assertIn("must-have", rule_reason(self.row("casual"), self.settings))
+        self.assertEqual(rule_reason(self.row("Ranked only"), self.settings), "")
+
+    def test_buyer_rules_use_only_what_eldorado_gave(self):
+        self.rules(skipSellers=True, minAccountDays=30, minReviews=3, minPositive=95, skipDisputed=True)
+        self.assertEqual(rule_reason(self.row(), self.settings), "")   # no seller flag, no join date: not held against
+        self.assertIn("seller", rule_reason(self.row(buyerSeller=True), self.settings))
+        self.assertIn("2 days old", rule_reason(self.row(buyerSince=1_000_000.0 - 2 * 86400), self.settings))
+        self.assertIn("1 reviews", rule_reason(self.row(buyerOrders=1), self.settings))
+        self.assertIn("80% positive", rule_reason(self.row(buyerScore=80.0), self.settings))
+        self.assertIn("disputed", rule_reason(self.row(buyerDisputes=0.1), self.settings))
+
+    def test_max_price_and_repeat(self):
+        self.rules(maxPrice=2)
+        self.assertIn("over your highest price", rule_reason(self.row(), self.settings))
+        self.rules(maxPrice=0, skipRepeat=True)
+        first, again = self.row("same"), self.row("same", rid="r2", created=1_003_600.0)
+        self.assertIn("same thing", rule_reason(again, self.settings, [first, again]))
+        self.assertEqual(rule_reason(first, self.settings, [first, again]), "")       # the first one still goes
+
+    def test_refuses_bad_rules(self):
+        for bad in ({"minReviews": -1}, {"minPositive": 101}, {"skipWords": "refund"}, {"skipSellers": "yes"},
+                    {"skipWords": [str(n) for n in range(51)]}):
+            with self.assertRaises(ValueError):
+                clean_settings({"rules": bad})
+
+    def test_steps_show_how_the_price_was_made(self):
+        self.assertEqual(level_steps([{"upTo": 20, "each": 0.02}, {"upTo": 75, "each": 0.04}], 1, 75),
+                         ["1 → 20: 19 × $0.02 = $0.38", "20 → 75: 55 × $0.04 = $2.20"])
+        q = self.row()["quote"]
+        self.assertEqual(q["price"], 2.58)
+        self.assertEqual(q["steps"][-1], "Delivery 20 minutes")
+
+
+class TryAndHealth(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.api = FakeApi()
+        self.desk = RequestDesk(self.api, os.path.join(self.dir.name, "r.json"), clock=lambda: 4_070_908_800.0 + 60)
+        self.desk.set_settings({"categories": {"Power Leveling": {"auto": True, "bands": [{"upTo": 75, "each": 0.0324}]}}})
+        self.api.requests["pl1"] = raw_request("Power Leveling", [("Current level", "1"), ("Desired level", "75")])
+        seller = raw_request("Power Leveling", [("Current level", "1"), ("Desired level", "50")])
+        seller["buyerInfo"] = {"user": {"username": "bob", "id": "b2", "isVerifiedSeller": True,
+                                        "createdDate": "2098-12-31T00:00:00Z"}, "userOrderInfo": {"ratingCount": 3}}
+        self.api.requests["pl2"] = seller
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_rules_keep_auto_away_in_live(self):
+        self.desk.set_settings({"mode": "live", "rules": {"skipSellers": True}})
+        self.desk.poll()
+        sent = [w[2]["details"]["boostingRequestId"] for w in self.api.writes if w[0] == "POST"]
+        self.assertEqual(sent, ["pl1"])
+        rows = {r["id"]: r for r in self.desk.snapshot()["requests"]}
+        self.assertEqual(rows["pl2"]["ruleSkip"], "The buyer is a verified seller.")
+        self.assertTrue(rows["pl2"]["buyerSeller"])
+        self.assertEqual(self.desk.snapshot()["stats"]["ruleSkipped"], 1)
+
+    def test_try_sends_and_saves_nothing(self):
+        self.desk.poll()
+        before = json.dumps(self.desk.data["settings"], sort_keys=True)
+        out = self.desk.trial({"rules": {"minAccountDays": 7}},
+                              {"category": "Power Leveling", "current": "10", "desired": "30"})
+        self.assertEqual(self.api.writes, [])
+        self.assertEqual(json.dumps(self.desk.data["settings"], sort_keys=True), before)
+        rows = {r["id"]: r for r in out["rows"]}
+        self.assertEqual(rows["pl1"]["outcome"], "send")              # judged as if Live were on
+        self.assertEqual(rows["pl2"]["outcome"], "rule")
+        self.assertIn("1 days old", rows["pl2"]["why"])
+        self.assertEqual(out["counts"], {"send": 1, "rule": 1, "you": 0})
+        self.assertEqual(out["sample"]["price"], 1.0)                  # the default lowest price
+        self.assertEqual(out["sample"]["steps"][:2], ["10 → 30: 20 × $0.0324 = $0.65", "Raised to your lowest price $1"])
+        with self.assertRaises(ValueError):
+            self.desk.trial({}, {"category": "Power Leveling", "current": "ten"})
+
+    def test_health_and_speed(self):
+        self.desk.set_settings({"mode": "live"})
+        self.desk.pass_once()
+        snap = self.desk.snapshot()
+        self.assertEqual(snap["health"]["passes"], 1)
+        self.assertEqual(snap["health"]["errors"], 0)
+        self.assertEqual(snap["stats"]["seenAfter"], 60.0)            # read a minute after the buyer posted
+        self.assertEqual(snap["stats"]["reaction"], 60.0)
+
+        def broken(path, query=None):
+            raise MarketError("down", 0)
+        self.api.signed_read = broken
+        self.desk.pass_once()
+        self.assertEqual(self.desk.health()["errors"], 1)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ The hub has its own token and its own call gate, so it never slows the order ala
 from __future__ import annotations
 
 import copy
+import gzip
 import json
 import logging
 import os
@@ -349,14 +350,24 @@ def explain(status: int, body: str) -> str:
 # ---------- transport ----------
 
 
+def _unpack(raw: bytes, headers) -> bytes:
+    if raw and (headers.get("Content-Encoding") or "").lower() == "gzip":
+        try:
+            return gzip.decompress(raw)
+        except (OSError, EOFError) as error:
+            raise MarketError("Eldorado sent a broken compressed reply.") from error
+    return raw
+
+
 def urllib_transport(method: str, url: str, headers: dict, body: bytes | None) -> str:
     """Send one request. GET may carry a JSON body: Eldorado's currency search needs that."""
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    # Eldorado compresses when asked: the request list is about a quarter of the size (8.3 kB -> 2.2 kB).
+    req = urllib.request.Request(url, data=body, headers={**headers, "Accept-Encoding": "gzip"}, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
-            return response.read().decode("utf-8", "replace")
+            return _unpack(response.read(), response.headers).decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
-        reply = error.read().decode("utf-8", "replace")
+        reply = _unpack(error.read(), error.headers).decode("utf-8", "replace")
         retry = None
         try:
             retry = float(error.headers.get("Retry-After")) if error.headers.get("Retry-After") else None

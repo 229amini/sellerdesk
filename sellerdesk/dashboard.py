@@ -193,6 +193,9 @@ def make_handler(engine, token: str, market=None, ledger=None, g2g=None, desk=No
             elif path == "/api/ledger/payments":
                 self._ledger(lambda body: ledger.add_payment(body))
                 return
+            elif path == "/api/requests/try":
+                self._desk(lambda body: desk.trial(body.get("settings") or {}, body.get("sample")))
+                return
             elif re.fullmatch(r"/api/requests/[\w-]+/offer", path):
                 request_id = path.split("/")[3]
                 self._desk(lambda body: desk.send(request_id, body.get("price"), body.get("delivery") or None,

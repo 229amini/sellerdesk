@@ -710,4 +710,28 @@ button.link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .req-setup label.chip, .req-setup label.switch { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); }
 .req-setup label.chip { height: 28px; padding: 0 10px; }
 .req-setup label.chip input, .req-setup label.switch input { width: auto; }
+.how-link { margin-left: 6px; font-size: 12px; }
+.how-list { margin: 0; padding: 6px 10px 6px 28px; border-radius: var(--r); background: var(--raised); font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.how-list li + li { margin-top: 2px; }
+.health { display: grid; gap: 3px; padding: 10px 12px; border-radius: var(--r); background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); font-size: 12px; }
+.health b { font-size: 13px; }
+.health b::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--up); vertical-align: 1px; }
+.health.warn b::before { background: var(--warm); }
+.health small { color: var(--muted); }
+.rules { display: grid; gap: 8px; padding-top: 4px; }
+.rule-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.try-sample { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.req-setup .try-sample select { width: auto; max-width: 200px; }
+.req-setup .try-sample input.lvl { width: 92px; }
+.req-setup .try-sample input.grow { flex: 1 1 220px; width: auto; }
+.try-sample button { min-height: 34px; height: 34px; }
+.try-out { display: grid; gap: 8px; }
+.try-list { display: grid; gap: 4px; max-height: 420px; overflow: auto; padding-right: 2px; }
+.try-item { display: grid; gap: 2px; padding: 8px 10px; border-radius: var(--r); background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); font-size: 13px; }
+.try-item.sample { box-shadow: inset 0 0 0 2px var(--signal); }
+.try-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.try-head .grow { flex: 1; }
+.try-item .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 760px) { .presets { grid-template-columns: 1fr; } .req-work { grid-template-columns: minmax(0, 1fr); } .req-side { max-height: none; } }
+.try-acts { display: flex; }
+.try-acts button { min-height: 34px; height: 34px; padding: 0 16px; }

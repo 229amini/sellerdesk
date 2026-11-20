@@ -334,3 +334,13 @@ class Bundle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Gzip(unittest.TestCase):
+    def test_unpacks_only_when_eldorado_says_gzip(self):
+        import gzip
+        from sellerdesk.market import _unpack
+        self.assertEqual(_unpack(gzip.compress(b'{"a":1}'), {"Content-Encoding": "gzip"}), b'{"a":1}')
+        self.assertEqual(_unpack(b'{"a":1}', {}), b'{"a":1}')
+        with self.assertRaises(MarketError):
+            _unpack(b"not gzip", {"Content-Encoding": "gzip"})

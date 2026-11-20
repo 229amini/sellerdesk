@@ -113,6 +113,27 @@ def money(value) -> float:
 # ---------- settings ----------
 
 
+REPEAT_HOURS = 24          # "repeat request": the same buyer asked the same thing within this
+TRY_ROWS = 60              # how many recent requests "Try" replays
+MAX_WORDS = 50
+
+
+def default_rules() -> dict:
+    """Which requests the auto sender leaves for you. Every rule is off until you set it."""
+    return {
+        "skipWords": [],        # skip when the buyer wrote any of these
+        "needWords": [],        # skip unless the buyer wrote at least one of these
+        "wholeWords": True,     # "elo" matches "my elo is 900", not "elometer"
+        "skipSellers": False,   # the buyer's own account is a verified seller
+        "minAccountDays": 0,
+        "minReviews": 0,
+        "minPositive": 0.0,     # % positive, checked only when the buyer has reviews
+        "skipDisputed": False,  # Eldorado counts disputes on the buyer's orders
+        "maxPrice": 0.0,        # 0 = no limit
+        "skipRepeat": False,
+    }
+
+
 def default_settings() -> dict:
     return {
         "mode": "off",
@@ -122,6 +143,7 @@ def default_settings() -> dict:
         "minPrice": 1.0,
         "platforms": list(PLATFORMS),
         "blocked": [],
+        "rules": default_rules(),
         "categories": {name: {"kind": kind, "auto": False, "bands": [], "perMillion": 0.0, "flat": 0.0,
                               "markup": 0.0, "delivery": ""}
                        for name, kind in CATEGORY_KINDS.items()},
@@ -167,6 +189,9 @@ def clean_settings(raw, old: dict | None = None) -> dict:
         if not isinstance(raw["blocked"], list) or not all(isinstance(b, str) for b in raw["blocked"]):
             raise ValueError("blocked must list buyer names")
         out["blocked"] = sorted({clean(b)[:60] for b in raw["blocked"] if clean(b)}, key=str.casefold)[:500]
+    if "rules" in raw:
+        out["rules"] = clean_rules(raw["rules"], out.get("rules"))
+    out.setdefault("rules", default_rules())
     for name, given in (raw.get("categories") or {}).items():
         if not isinstance(name, str) or not isinstance(given, dict):
             raise ValueError("categories must map a name to its settings")
@@ -206,6 +231,51 @@ def clean_settings(raw, old: dict | None = None) -> dict:
                     raise ValueError("upTo must be a whole level from 1")
                 clean_bands.append({"upTo": int(up_to), "each": _price(band.get("each"), "each")})
             rule["bands"] = sorted(clean_bands, key=lambda b: b["upTo"])
+    return out
+
+
+def _whole(value, name, top) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or not 0 <= value <= top:
+        raise ValueError(f"{name} must be a whole number from 0 to {top}")
+    return int(value)
+
+
+def _words(value, name) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(w, str) for w in value):
+        raise ValueError(f"{name} must list words")
+    out = []
+    for word in value:
+        word = clean(word).casefold()[:40]
+        if word and word not in out:
+            out.append(word)
+    if len(out) > MAX_WORDS:
+        raise ValueError(f"{name} takes up to {MAX_WORDS} words")
+    return out
+
+
+def clean_rules(raw, old: dict | None = None) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("rules must be an object")
+    out = dict(default_rules(), **(old or {}))
+    for key in ("skipWords", "needWords"):
+        if key in raw:
+            out[key] = _words(raw[key], key)
+    for key in ("wholeWords", "skipSellers", "skipDisputed", "skipRepeat"):
+        if key in raw:
+            if not isinstance(raw[key], bool):
+                raise ValueError(f"{key} must be true or false")
+            out[key] = raw[key]
+    if "minAccountDays" in raw:
+        out["minAccountDays"] = _whole(raw["minAccountDays"], "minAccountDays", 3650)
+    if "minReviews" in raw:
+        out["minReviews"] = _whole(raw["minReviews"], "minReviews", 100_000)
+    if "minPositive" in raw:
+        value = raw["minPositive"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+            raise ValueError("minPositive must be a percent from 0 to 100")
+        out["minPositive"] = float(value)
+    if "maxPrice" in raw:
+        out["maxPrice"] = _price(raw["maxPrice"], "maxPrice")
     return out
 
 
@@ -351,6 +421,21 @@ def level_price(bands: list, current: int, desired: int) -> float | None:
     return total
 
 
+def level_steps(bands: list, current: int, desired: int) -> list[str]:
+    """'1 → 20: 19 × $0.02 = $0.38', one line per range the request crosses."""
+    lines, start = [], current
+    for band in bands:
+        if start >= desired:
+            break
+        if band["upTo"] <= start:
+            continue
+        end = min(desired, band["upTo"])
+        count = end - start
+        lines.append(f"{start} → {end}: {count} × ${band['each']:g} = ${count * band['each']:.2f}")
+        start = end
+    return lines
+
+
 def rule_for(settings: dict, category: str) -> dict:
     """The category's rule; Eldorado writes "Custom Request" in one game and "Custom request" in another."""
     rules = settings["categories"]
@@ -369,7 +454,8 @@ def quote(request: dict, settings: dict, offers: list) -> dict:
     fields = request["fields"]
     words = words_of(fields)
     result = {"kind": kind, "price": None, "basis": "", "sure": False, "why": "", "items": [], "maybe": [],
-              "size": 1}
+              "size": 1, "steps": []}
+    steps = result["steps"]
     if kind == "levels":
         try:
             current = int(float(field(fields, "Current level")))
@@ -381,6 +467,7 @@ def quote(request: dict, settings: dict, offers: list) -> dict:
         if price is None:
             result["why"] = f"No price for levels {current} to {desired}. Add them in Prices."
             return result
+        steps.extend(level_steps(rule["bands"], current, desired))
         result.update(price=price, basis=f"levels {current} → {desired}", sure=True,
                       size=max(1, math.ceil((desired - current) / LEVELS_PER_STEP)))
     elif kind == "coins":
@@ -388,7 +475,9 @@ def quote(request: dict, settings: dict, offers: list) -> dict:
         if not amount or not rule.get("perMillion"):
             result["why"] = "Set a price per million coins." if amount else "No coin amount in the request."
             return result
-        result.update(price=amount / 1_000_000 * rule["perMillion"], basis=f"{amount:,} coins", sure=True,
+        price = amount / 1_000_000 * rule["perMillion"]
+        steps.append(f"{amount:,} coins × ${rule['perMillion']:g} per million = ${price:.2f}")
+        result.update(price=price, basis=f"{amount:,} coins", sure=True,
                       size=max(1, math.ceil(amount / 1_000_000)))
     elif kind == "items":
         found, maybe = match_items(words, [o for o in offers if not o.is_currency])
@@ -402,6 +491,9 @@ def quote(request: dict, settings: dict, offers: list) -> dict:
             return result
         total = sum(f["count"] * f["each"] for f in found)
         markup = rule.get("markup") or 0.0
+        steps.extend(f"{f['count']} × {f['name']} at ${f['each']:g} = ${f['count'] * f['each']:.2f}" for f in found)
+        if markup:
+            steps.append(f"{markup:+g}% = ${total * (1 + markup / 100):.2f}")
         result.update(price=total * (1 + markup / 100),
                       basis=" + ".join(f"{f['count']} × {f['name']} {f['each']:g}" for f in found)
                       + (f", {markup:+g}%" if markup else ""))
@@ -421,18 +513,94 @@ def quote(request: dict, settings: dict, offers: list) -> dict:
         if not rule.get("flat"):
             result["why"] = "Set a price for this kind of request."
             return result
+        steps.append(f"Your set price ${rule['flat']:g}")
         result.update(price=rule["flat"], basis="your set price", sure=True)
     else:
         result["why"] = "Read it and send your own price."
         return result
-    price = money(max(result["price"], settings.get("minPrice") or 0))
+    floor = settings.get("minPrice") or 0
+    if result["price"] < floor:
+        steps.append(f"Raised to your lowest price ${floor:g}")
+    price = money(max(result["price"], floor))
     result["price"] = price
     result["delivery"] = delivery_for(request["category"], settings, result["size"])
+    steps.append(f"Delivery {delivery_text(result['delivery'])}"
+                 + (f" ({result['size']} jobs of your time)" if result["size"] > 1 and settings.get("deliveryMode") == "auto"
+                    and not rule.get("delivery") else ""))
     budget = budget_of(words)
     if budget is not None and price > budget:
         result["sure"] = False
         result["why"] = f"The buyer asks for under ${budget:g}."
     return result
+
+
+def _has_word(text: str, word: str, whole: bool) -> bool:
+    if not whole:
+        return word in text
+    return re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text) is not None
+
+
+def rule_reason(row: dict, settings: dict, others=()) -> str:
+    """Why your rules keep the auto sender off this request, or "". Buyer facts Eldorado didn't give are never
+    held against the buyer."""
+    rules = settings.get("rules") or default_rules()
+    if row.get("blocked"):
+        return "You blocked this buyer."
+    if row.get("platform") and row["platform"] not in settings.get("platforms", PLATFORMS):
+        return f"{row['platform']} is not one of your platforms."
+    text = (row.get("text") or "").casefold()
+    whole = rules.get("wholeWords", True)
+    hit = next((w for w in rules.get("skipWords") or [] if _has_word(text, w, whole)), None)
+    if hit:
+        return f"The buyer wrote “{hit}”."
+    need = rules.get("needWords") or []
+    if need and not any(_has_word(text, w, whole) for w in need):
+        return "None of your must-have words: " + ", ".join(need[:5]) + "."
+    if rules.get("skipSellers") and row.get("buyerSeller"):
+        return "The buyer is a verified seller."
+    since = row.get("buyerSince") or 0
+    if rules.get("minAccountDays") and since and row.get("created"):
+        days = (row["created"] - since) / 86400
+        if days < rules["minAccountDays"]:
+            return f"The buyer's account is {max(0, int(days))} days old."
+    reviews = row.get("buyerOrders")
+    if rules.get("minReviews") and reviews is not None and reviews < rules["minReviews"]:
+        return f"The buyer has {reviews} reviews."
+    score = row.get("buyerScore")
+    if rules.get("minPositive") and reviews and score is not None and score < rules["minPositive"]:
+        return f"The buyer is {score:.0f}% positive."
+    if rules.get("skipDisputed") and (row.get("buyerDisputes") or 0) > 0:
+        return "The buyer has disputed orders."
+    price = (row.get("quote") or {}).get("price")
+    if rules.get("maxPrice") and price is not None and price > rules["maxPrice"]:
+        return f"${price:g} is over your highest price ${rules['maxPrice']:g}."
+    if rules.get("skipRepeat") and row.get("buyer"):
+        for other in others:
+            if (other.get("id") != row.get("id") and other.get("buyer") == row["buyer"]
+                    and other.get("category") == row.get("category") and other.get("text") == row.get("text")
+                    and 0 < row.get("created", 0) - other.get("created", 0) <= REPEAT_HOURS * 3600):
+                return "The buyer asked the same thing earlier."
+    return ""
+
+
+def verdict(row: dict, settings: dict, live: bool = False) -> tuple[str, str]:
+    """("send", "") when the auto sender would offer on this request, else ("", why not). live=True judges as if
+    Live were on, which is what Try shows."""
+    rule = rule_for(settings, row["category"])
+    q = row.get("quote") or {}
+    if row.get("spam"):
+        return "", "Looks like spam."
+    if row.get("ruleSkip"):
+        return "", row["ruleSkip"]
+    if q.get("price") is None:
+        return "", q.get("why") or "No price."
+    if not q.get("sure"):
+        return "", q.get("why") or "Check it first."
+    if not rule.get("auto"):
+        return "", f"Auto is off for {row['category']}."
+    if not live and settings["mode"] == "off":
+        return "", "Auto offers are off."
+    return "send", ""
 
 
 # ---------- the desk ----------
@@ -452,6 +620,8 @@ class RequestDesk:
         self._backlog: list[dict] = []
         self.problem = ""
         self.last_poll = None
+        self._polls: list[tuple[float, float]] = []   # (when, seconds) of each pass in the last hour
+        self._errors: list[float] = []
         self.data = self._load()
 
     # --- storage ---
@@ -524,20 +694,68 @@ class RequestDesk:
             "sent": sum(1 for r in today if (r.get("mine") or {}).get("offerId")),
             "simulated": sum(1 for r in today if (r.get("mine") or {}).get("by") == "simulate"),
             "won": sum(1 for r in today if (r.get("mine") or {}).get("state") == "OfferWon"),
+            "ruleSkipped": sum(1 for r in today if r.get("ruleSkip") and not r.get("spam")),
+            "seenAfter": _median([r["seenAfter"] for r in today if r.get("seenAfter") is not None]),
+            "reaction": _median([r["mine"]["reaction"] for r in today if (r.get("mine") or {}).get("reaction") is not None]),
         }
         shown = {r["id"] for r in rows if self._is_open(r)}
         shown |= {r["id"] for r in [r for r in rows if r["id"] not in shown][:SHOW_CLOSED]}
         return {"settings": data["settings"], "requests": [r for r in rows if r["id"] in shown], "stats": stats,
-                "checked": self.last_poll, "problem": self.problem or None,
+                "checked": self.last_poll, "problem": self.problem or None, "health": self.health(),
                 "deliveryTimes": list(DELIVERY_TIMES), "kinds": list(KINDS)}
+
+    def health(self) -> dict:
+        """How the desk itself is doing: how long a pass takes, how many passed and failed in the last hour,
+        and whether Eldorado asked it to slow down."""
+        hour = self.clock() - 3600
+        polls = [s for t, s in self._polls if t >= hour]
+        return {"passes": len(polls), "passSeconds": _median(polls), "errors": sum(1 for t in self._errors if t >= hour),
+                "holding": bool(getattr(self.api, "holding", False)), "pollSeconds": self.poll_seconds}
+
+    # --- try your settings ---
+
+    def trial(self, raw: dict, sample: dict | None = None) -> dict:
+        """What these settings would do, saved or not: each recent request with its price, how it was worked
+        out, and whether it would go out by itself in Live or why not. Sends and saves nothing."""
+        with self._lock:
+            settings = clean_settings(raw or {}, self.data["settings"])
+            rows = sorted((copy.deepcopy(r) for r in self.data["requests"].values() if not r.get("spam")),
+                          key=lambda r: r.get("created", 0), reverse=True)[:TRY_ROWS]
+            others = list(self.data["requests"].values())
+            offers = list(self._offers)
+        out = []
+        for row in rows:
+            out.append(self._judge(row, settings, offers, others))
+        counts = {"send": sum(1 for r in out if r["outcome"] == "send"),
+                  "rule": sum(1 for r in out if r["outcome"] == "rule"),
+                  "you": sum(1 for r in out if r["outcome"] == "you")}
+        result = {"rows": out, "counts": counts}
+        if sample:
+            result["sample"] = self._judge(sample_request(sample), settings, offers, [])
+        return result
+
+    @staticmethod
+    def _judge(row: dict, settings: dict, offers: list, others: list) -> dict:
+        row["quote"] = quote(row, settings, offers)
+        row["ruleSkip"] = rule_reason(row, settings, others)
+        action, why = verdict(row, settings, live=True)
+        outcome = "send" if action else "rule" if row["ruleSkip"] else "you"
+        q = row["quote"]
+        return {"id": row.get("id", ""), "category": row.get("category", ""), "game": row.get("game", ""),
+                "buyer": row.get("buyer", ""), "created": row.get("created", 0), "text": row.get("text", "")[:200],
+                "price": q.get("price"), "delivery": q.get("delivery"), "steps": q.get("steps") or [],
+                "basis": q.get("basis", ""), "outcome": outcome, "why": why}
 
     # --- settings ---
 
     def set_settings(self, raw: dict) -> dict:
         with self._lock:
             self.data["settings"] = clean_settings(raw, self.data["settings"])
-            for row in self.data["requests"].values():
+            others = list(self.data["requests"].values())
+            for row in others:
+                row["blocked"] = row.get("buyer", "").casefold() in {b.casefold() for b in self.data["settings"]["blocked"]}
                 row["quote"] = quote(row, self.data["settings"], self._offers)
+                row["ruleSkip"] = rule_reason(row, self.data["settings"], others)
             self._save()
             log.info("requests: settings saved, mode %s", self.data["settings"]["mode"])
             return copy.deepcopy(self.data["settings"])
@@ -581,6 +799,10 @@ class RequestDesk:
             "buyerId": str(buyer.get("id") or listed.get("buyerId") or ""),
             "buyerOrders": int(record.get("ratingCount") or 0),
             "buyerScore": record.get("feedbackScore"),
+            "buyerNegative": int(record.get("negativeCount") or 0),
+            "buyerDisputes": float(record.get("disputedAccountOrderRatio") or 0),
+            "buyerSeller": bool(buyer.get("isVerifiedSeller")),
+            "buyerSince": parse_time(buyer.get("createdDate")) if buyer.get("createdDate") else 0.0,
             "created": parse_time(raw.get("createdDate") or listed.get("createdDate")),
             "expires": parse_time(raw.get("expireDate")),
             "state": clean(raw.get("state")),
@@ -610,6 +832,9 @@ class RequestDesk:
         fresh["spam"] = bool(SPAM.search(fresh["text"]))
         fresh["blocked"] = fresh["buyer"].casefold() in {b.casefold() for b in settings["blocked"]}
         fresh["quote"] = quote(fresh, settings, self._offers)
+        fresh["ruleSkip"] = rule_reason(fresh, settings, self.data["requests"].values())
+        if "seenAfter" in old:
+            fresh["seenAfter"] = old["seenAfter"]
         self.data["requests"][fresh["id"]] = fresh
         return fresh
 
@@ -711,16 +936,13 @@ class RequestDesk:
         """What the auto sender does with a new request: "simulate", "send" or nothing. Call under the lock."""
         settings = self.data["settings"]
         mode = settings["mode"]
-        rule = rule_for(settings, row["category"])
         q = row["quote"]
-        if mode == "off" or not rule.get("auto") or not q.get("sure") or q.get("price") is None:
+        action, _ = verdict(row, settings)
+        if not action:
             return None
-        if row["spam"] or row["blocked"] or row["state"] != "Active" or row["mine"].get("offerId") \
-                or row["id"] in self.data["skipped"]:
+        if row["state"] != "Active" or row["mine"].get("offerId") or row["id"] in self.data["skipped"]:
             return None
         if row["mine"].get("state") not in ("", "WaitingForOffer"):
-            return None
-        if row["platform"] and row["platform"] not in settings["platforms"]:
             return None
         if mode == "simulate":
             row["mine"].update(by="simulate", price=q["price"], at=self.clock(),
@@ -811,11 +1033,18 @@ class RequestDesk:
                 continue
             with self._lock:
                 row = self._merge(fresh)
+                age = self.clock() - row.get("created", 0)
+                if row.get("created") and age < 300:   # a request that came in while the desk was running
+                    row["seenAfter"] = round(max(0.0, age), 1)
                 action = self._decide(row)
                 price = row["quote"].get("price")
             if action == "send":
                 try:
                     self.send(raw["id"], price, by="auto")
+                    with self._lock:
+                        sent = self.data["requests"][raw["id"]]
+                        if sent.get("created"):
+                            sent["mine"]["reaction"] = round(max(0.0, self.clock() - sent["created"]), 1)
                 except (MarketError, ValueError) as error:
                     with self._lock:
                         self.data["requests"][raw["id"]]["mine"]["error"] = str(error)[:200]
@@ -862,22 +1091,63 @@ class RequestDesk:
     def start(self) -> threading.Thread:
         def run():
             while not self._stop.is_set():
-                try:
-                    self.poll()
-                except MarketError as error:
-                    self.problem = str(error)
-                    log.warning("requests: %s", error)
-                except Exception as error:  # never take the server down
-                    self.problem = "The request desk hit a problem; see the server log."
-                    log.exception("requests: %s", error)
+                self.pass_once()
                 self._stop.wait(self.poll_seconds)
 
         thread = threading.Thread(target=run, daemon=True, name="requests")
         thread.start()
         return thread
 
+    def pass_once(self) -> None:
+        """One poll, timed for the health panel. Never raises."""
+        began = self.clock()
+        try:
+            self.poll()
+        except MarketError as error:
+            self.problem = str(error)
+            self._errors.append(self.clock())
+            log.warning("requests: %s", error)
+        except Exception as error:  # never take the server down
+            self.problem = "The request desk hit a problem; see the server log."
+            self._errors.append(self.clock())
+            log.exception("requests: %s", error)
+        else:
+            self._polls.append((self.clock(), round(self.clock() - began, 2)))
+        hour = self.clock() - 3600
+        self._polls = [p for p in self._polls if p[0] >= hour][-1000:]
+        self._errors = [t for t in self._errors if t >= hour][-1000:]
+
     def stop(self) -> None:
         self._stop.set()
+
+
+def _median(values: list) -> float | None:
+    values = sorted(v for v in values if isinstance(v, (int, float)))
+    if not values:
+        return None
+    mid = len(values) // 2
+    return round(values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2, 2)
+
+
+def sample_request(sample: dict) -> dict:
+    """A request you type into Try: a kind, what the buyer wrote, and levels for a levels kind."""
+    if not isinstance(sample, dict):
+        raise ValueError("sample must be an object")
+    category = clean(sample.get("category"))[:60]
+    if not category:
+        raise ValueError("pick a kind of request")
+    text = clean(sample.get("text"))[:MAX_TEXT]
+    fields = []
+    for label, key in (("Current level", "current"), ("Desired level", "desired")):
+        value = clean(sample.get(key))
+        if value:
+            if not re.fullmatch(r"\d{1,5}", value):
+                raise ValueError("levels must be whole numbers")
+            fields.append([label, value])
+    if text:
+        fields.append(["Request description", text])
+    return {"id": "", "category": category, "fields": fields, "text": words_of(fields), "buyer": "", "platform": "",
+            "state": "Active", "mine": {}, "spam": bool(SPAM.search(text)), "blocked": False, "created": 0}
 
 
 def delivery_minutes(code: str) -> int:

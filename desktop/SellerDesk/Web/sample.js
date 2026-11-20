@@ -132,19 +132,22 @@
       const categories = Object.fromEntries(Object.entries(cats).map(([n, kind]) => [n, { kind, auto: n === 'Power Leveling', bands: n === 'Power Leveling' ? [{ upTo: 40, each: 0.03 }, { upTo: 75, each: 0.035 }] : [], perMillion: n === 'Coins Farm' ? 2.5 : 0, flat: 0, markup: 0, delivery: '' }]));
       const req = (id, category, ago, fields, extra) => Object.assign({ id, game: 'Arc Raiders', gameId: '319', category, buyer: 'buyer_' + id, buyerOrders: 12, created: t - ago * 60, state: 'Active', sellers: 770, viewers: 14, fields, platform: (fields.find(f => f[0] === 'Platform') || [])[1] || '', text: '', spam: false, blocked: false, hidden: false, mine: { state: 'WaitingForOffer' }, quote: { price: null, why: 'Read it and send your own price.', basis: '', sure: false } }, extra);
       return {
-        settings: { mode: 'simulate', delivery: 'Minute20', message: 'Hi {buyer}! I can do it for {price}, ready in {delivery}.', minPrice: 1, platforms: ['PC', 'PlayStation', 'Xbox'], blocked: ['lowballer99'], categories },
-        stats: { seen: 41, spam: 9, sent: 3, simulated: 6, won: 1 },
+        settings: { mode: 'simulate', delivery: 'Minute20', message: 'Hi {buyer}! I can do it for {price}, ready in {delivery}.', minPrice: 1, platforms: ['PC', 'PlayStation', 'Xbox'], blocked: ['lowballer99'], categories,
+          rules: { skipWords: ['refund'], needWords: [], wholeWords: true, skipSellers: true, minAccountDays: 0, minReviews: 0, minPositive: 0, skipDisputed: false, maxPrice: 0, skipRepeat: false } },
+        stats: { seen: 41, spam: 9, sent: 3, simulated: 6, won: 1, ruleSkipped: 2, seenAfter: 6.5, reaction: 8.2 },
+        health: { passes: 342, passSeconds: 0.9, errors: 0, holding: false, pollSeconds: 10 },
         checked: new Date().toISOString(), problem: null,
         deliveryTimes: ['Minute20', 'Hour1', 'Hour2', 'Hour3', 'Hour5', 'Hour8', 'Hour12', 'Day1', 'Day2', 'Day3'],
         requests: [
           req('q1', 'Custom Request', 2, [['Platform', 'PC'], ['Request description', '12 Tempest IV']], { quote: { price: 13.2, basis: '12 × Tempest IV 1.1', sure: true, why: '', delivery: 'Minute20' } }),
-          req('q2', 'Power Leveling', 4, [['Current level', '1'], ['Desired level', '75'], ['Platform', 'PC'], ['Completion Method', 'Solo'], ['Provide any additional information', '10 turbine']], { quote: { price: 2.42, basis: 'levels 1 → 75', sure: true, why: '', delivery: 'Hour1' }, mine: { state: 'WaitingForOffer', by: 'simulate', price: 2.42, delivery: 'Minute20' } }),
+          req('q2', 'Power Leveling', 4, [['Current level', '1'], ['Desired level', '75'], ['Platform', 'PC'], ['Completion Method', 'Solo'], ['Provide any additional information', '10 turbine']], { quote: { price: 2.42, basis: 'levels 1 → 75', sure: true, why: '', delivery: 'Hour1', steps: ['1 → 40: 39 × $0.03 = $1.17', '40 → 75: 35 × $0.035 = $1.23', 'Delivery 1 hour (3 jobs of your time)'] }, mine: { state: 'WaitingForOffer', by: 'simulate', price: 2.42, delivery: 'Minute20' } }),
           req('q3', 'Custom Request', 9, [['Platform', 'PC'], ['Request description', '10 SnapHook less than 3']], { quote: { price: 3.6, basis: '10 × Snap Hook 0.36', sure: false, why: 'The buyer asks for under $3.' } }),
           req('q4', 'Custom Request', 12, [['Platform', 'PlayStation'], ['Request description', '25 Anvils']], { quote: { price: null, basis: '', sure: false, why: 'Not one of your offers. Close: Anvil IV' } }),
           req('q5', 'Stash Upgrade', 15, [['Current level', '1'], ['Desired level', '10'], ['Platform', 'PC']], { quote: { price: null, basis: '', sure: false, why: 'No price for levels 1 to 10. Add them in Prices.' } }),
           req('q6', 'Power Leveling', 31, [['Current level', '20'], ['Desired level', '60'], ['Platform', 'Xbox']], { quote: { price: 1.35, basis: 'levels 20 → 60', sure: true, why: '' }, mine: { state: 'OfferPlaced', offerId: 'o6', price: 1.35, delivery: 'Hour2', by: 'auto' } }),
           req('q9', 'Coins Farm', 38, [['Platform', 'PC'], ['Request description', '1 mil coins']], { quote: { price: 2.5, basis: '1,000,000 coins', sure: true, why: '', delivery: 'Minute20' }, mine: { state: 'OfferWon', offerId: 'o9', price: 2.5, delivery: 'Minute20', by: 'auto' } }),
           req('q7', 'Custom Request', 44, [['Platform', 'PlayStation'], ['Request description', 'SnapBid automates your boosting requests 24/7, snapbid.net']], { spam: true }),
+          req('q10', 'Power Leveling', 20, [['Current level', '5'], ['Desired level', '40'], ['Platform', 'PC']], { buyerSeller: true, buyerScore: 99.6, ruleSkip: 'The buyer is a verified seller.', quote: { price: 1.05, basis: 'levels 5 → 40', sure: true, why: '', delivery: 'Minute20' } }),
           req('q8', 'Trials', 50, [['Request description', 'Need all trials done this week'], ['Platform', 'PC']], { quote: { kind: 'review', price: null, why: 'Read it and send your own price.', basis: '', sure: false } }),
         ],
       };
@@ -214,6 +217,14 @@
     if (type === 'reqWithdraw') { const r = desk.requests.find(x => x.id === data.id); r.mine = { state: 'WaitingForOffer' }; }
     if (type === 'reqHide') { const r = desk.requests.find(x => x.id === data.id); r.hidden = data.hidden === 'true'; }
     if (type === 'reqSkip') { const r = desk.requests.find(x => x.id === data.id); r.skipped = data.skipped === 'true'; }
+    if (type === 'reqTryClear') state.requests.trial = null;
+    if (type === 'reqTry') {
+      const rows = desk.requests.filter(r => !r.spam).map(r => ({ id: r.id, category: r.category, game: r.game, buyer: r.buyer, text: r.fields.map(f => f[1]).join(' | '), price: r.quote.price, delivery: r.quote.delivery, basis: r.quote.basis, steps: r.quote.steps || [],
+        outcome: r.ruleSkip ? 'rule' : r.quote.sure && r.quote.price != null && (desk.settings.categories[r.category] || {}).auto ? 'send' : 'you', why: r.ruleSkip || (r.quote.price == null ? r.quote.why : (desk.settings.categories[r.category] || {}).auto ? r.quote.why : `Auto is off for ${r.category}.`) }));
+      const counts = { send: rows.filter(r => r.outcome === 'send').length, rule: rows.filter(r => r.outcome === 'rule').length, you: rows.filter(r => r.outcome === 'you').length };
+      state.requests.trial = { rows, counts };
+      if (data.sample) state.requests.trial.sample = { id: '', category: data.sample.category, price: 1.2, delivery: 'Hour1', basis: 'levels 10 → 50', outcome: 'send', why: '', steps: ['10 → 40: 30 × $0.03 = $0.90', '40 → 50: 10 × $0.035 = $0.35', 'Delivery 1 hour (2 jobs of your time)'] };
+    }
     if (type === 'theme') state.theme = data.value;
     if (type === 'updateLater') state.update = null;
     if (type === 'update' && state.update) { state.update.percent = 0; const step = () => { state.update.percent = Math.min(100, state.update.percent + 25); if (state.update.percent < 100) setTimeout(step, 150); else state.update.percent = null, state.update.starting = true; window.managerState(state); }; setTimeout(step, 150); }

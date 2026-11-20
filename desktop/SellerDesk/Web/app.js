@@ -1649,8 +1649,9 @@ const reqDraft = {};        // request id -> { price, delivery }
 
 const reqData = () => (state.requests && state.requests.data) || null;
 const reqNow = () => Date.now() / 1000;
-const reqOpen = r => r.state === 'Active' && !r.spam && !r.hidden && !r.skipped;
-const reqSkipped = r => !!r.skipped && !r.spam && !r.hidden;
+const reqOpen = r => r.state === 'Active' && !r.spam && !r.hidden && !r.skipped && !r.ruleSkip;
+const reqSkipped = r => !!(r.skipped || r.ruleSkip) && !r.spam && !r.hidden;   // by you, or by your rules
+const reqHow = new Set();   // cards showing how their price was worked out
 const reqSent = r => !!(r.mine && r.mine.offerId);
 const reqWon = r => !!(r.mine && r.mine.state === 'OfferWon');
 const reqToAnswer = r => reqOpen(r) && !reqSent(r) && !reqWon(r);
@@ -1700,6 +1701,7 @@ function reqChips(r) {
   if (r.spam) return h('span', { class: 'pill warn' }, 'Spam');
   if (r.state && r.state !== 'Active') return h('span', { class: 'pill quiet' }, r.state === 'Gone' ? 'Gone' : r.state === 'Bought' ? 'Bought' : 'Closed');
   if (r.skipped) return h('span', { class: 'pill quiet' }, 'Skipped');
+  if (r.ruleSkip) return h('span', { class: 'pill quiet', title: r.ruleSkip }, 'Your rule skips it');
   if (q.price == null) return h('span', { class: 'pill warn' }, q.kind === 'review' ? 'Read it' : 'No price');
   return q.sure ? null : h('span', { class: 'pill warn' }, 'Check it');
 }
@@ -1760,19 +1762,26 @@ function reqCard(r) {
   const basis = q.kind === 'levels' || /^levels /.test(q.basis || '') ? '' : q.basis;   // the title already says 1 → 75
   const quick = open && !reqSent(r) && !reqWon(r) && q.price != null && reqEditing !== r.id;
   const cls = ['req', reqWon(r) ? 'won' : reqSent(r) ? 'sent' : '', r.state !== 'Active' ? 'closed' : ''].filter(Boolean).join(' ');
+  const why = r.ruleSkip && !reqSent(r) && !r.skipped ? `Skipped: ${r.ruleSkip}` : '';
   return h('article', { class: cls, 'data-key': 'r' + r.id },
     h('div', { class: 'req-head' },
       h('div', { class: 'req-title' }, h('b', {}, r.category || 'Request', reqLevels(r) ? ` ${reqLevels(r)}` : ''),
         h('small', { class: 'quiet' }, `${r.game} · ${reqAge(r)}`)),
       h('div', { class: 'req-right' }, reqChips(r), reqOfferChip(r))),
     reqFacts(r),
-    basis || q.why ? h('p', { class: 'req-quote' },
+    basis || q.why || why || (q.steps || []).length ? h('p', { class: 'req-quote' },
       basis ? h('span', { class: 'quiet' }, basis) : null,
-      q.why ? h('span', { class: q.price != null ? 'warn-text' : 'quiet' }, (basis ? ' · ' : '') + q.why) : null) : null,
+      why ? h('span', { class: 'quiet' }, (basis ? ' · ' : '') + why) : null,
+      q.why ? h('span', { class: q.price != null ? 'warn-text' : 'quiet' }, (basis || why ? ' · ' : '') + q.why) : null,
+      (q.steps || []).length ? h('button', { type: 'button', class: 'link how-link', 'data-do': 'reqHow', 'data-id': r.id, 'aria-expanded': String(reqHow.has(r.id)) },
+        reqHow.has(r.id) ? 'Hide the math' : 'How?') : null) : null,
+    reqHow.has(r.id) && (q.steps || []).length ? howList(q.steps, 'h' + r.id) : null,
     h('div', { class: 'req-buyer quiet' },
       h('span', { class: 'avatar', 'aria-hidden': 'true' }, (r.buyer || '?').slice(0, 1).toUpperCase()),
       h('b', {}, r.buyer), buyerNote(r.buyer) ? h('small', { class: 'buyer-tag' }, buyerNote(r.buyer)) : null,
       h('span', {}, plural(r.buyerOrders || 0, 'review')),
+      r.buyerOrders && r.buyerScore != null ? h('span', {}, `${Math.round(r.buyerScore)}% positive`) : null,
+      r.buyerSeller ? h('span', { class: 'warn-text' }, 'also a seller') : null,
       r.sellers ? h('span', {}, `${r.sellers} sellers can see this`) : null,
       r.viewers ? h('span', {}, `${r.viewers} looking`) : null,
       reqSent(r) ? h('span', { class: 'up-text' }, 'offer sent ✓') : null),
@@ -1789,6 +1798,29 @@ function reqCard(r) {
         ? h('button', { type: 'button', class: 'line', 'data-do': 'reqSkip', 'data-id': r.id, 'data-skipped': String(!r.skipped) }, r.skipped ? 'Undo skip' : 'Skip') : null,
       r.blocked ? h('span', { class: 'quiet' }, 'Blocked') : h('button', { type: 'button', class: 'line danger', 'data-do': 'reqBlock', 'data-buyer': r.buyer }, 'Block buyer'),
       h('button', { type: 'button', class: 'line', 'data-do': 'reqHide', 'data-id': r.id, 'data-hidden': String(!r.hidden) }, r.hidden ? 'Show again' : 'Hide (spam)')));
+}
+
+// "20 → 75: 55 × $0.04 = $2.20", one line per part of the price, as the server worked it out.
+function howList(steps, key) {
+  return h('ol', { class: 'how-list', 'data-key': key }, steps.map(line => h('li', {}, line)));
+}
+
+const secs = v => v == null ? '–' : v < 60 ? `${Math.round(v)} s` : `${Math.round(v / 60)} min`;
+
+// How the server's desk is doing, so a quiet feed reads as "no requests" and not as "it stopped".
+function reqHealth(d) {
+  const hl = d.health || {};
+  const st = d.stats || {};
+  const bad = hl.errors > 0 || hl.holding;
+  return h('div', { class: bad ? 'health warn' : 'health' },
+    h('b', {}, bad ? 'Server: having trouble' : 'Server: working'),
+    h('small', {}, `Reads every ${hl.pollSeconds || 10} s · ${hl.passes || 0} reads in the last hour`
+      + (hl.passSeconds != null ? ` · ${hl.passSeconds} s each` : '')),
+    hl.errors ? h('small', { class: 'warn-text' }, `${plural(hl.errors, 'failed read')} in the last hour`) : null,
+    hl.holding ? h('small', { class: 'warn-text' }, 'Eldorado asked for fewer requests. Reads wait, then go on.') : null,
+    st.seenAfter != null ? h('small', {}, `New requests seen ${secs(st.seenAfter)} after the buyer posts`) : null,
+    st.reaction != null ? h('small', {}, `Auto offers out ${secs(st.reaction)} after the buyer posts`) : null,
+    st.ruleSkipped ? h('small', {}, `${plural(st.ruleSkipped, 'request')} skipped by your rules today`) : null);
 }
 
 // ---------- the state column ----------
@@ -1834,6 +1866,7 @@ function reqStatus(d) {
       h('p', { class: priced ? 'quiet' : 'warn-text' }, `${priced} of ${kinds.length} kinds have a price · Auto on for ${auto.length}`),
       h('button', { type: 'button', class: priced ? 'line' : 'solid', 'data-do': 'reqSetup' }, priced ? 'Edit prices and rules' : 'Set your prices')),
     d.problem ? h('p', { class: 'note bad' }, d.problem) : null,
+    reqHealth(d),
     h('p', { class: 'note', role: 'status' }, state.requests.note),
     h('p', { class: 'quiet how' }, h('b', {}, 'How it works: '),
       'Eldorado shows every seller the requests buyers post. Your server reads them every 10 seconds and prices them from your rules; in Live it sends the offer too. ',
@@ -2057,8 +2090,10 @@ function reqSetupPanel() {
       h('div', { class: 'chips' }, h('small', { class: 'quiet' }, 'Platforms'),
         ['PC', 'PlayStation', 'Xbox'].map(p => h('label', { class: 'chip' }, h('input', { type: 'checkbox', 'data-rule': 'platform', 'data-cat': '', 'data-value': p, checked: s.platforms.includes(p) }), p))),
       h('label', { class: 'one' }, 'Never offer under, $', h('input', { 'data-rule': 'minPrice', 'data-cat': '', value: s.minPrice, inputmode: 'decimal' })),
+      h('label', { class: 'one' }, 'Never offer over, $', h('input', { 'data-rules': 'maxPrice', value: num0(s.rules.maxPrice), inputmode: 'decimal', placeholder: 'No limit' })),
       s.blocked.length ? h('div', { class: 'chips' }, h('small', { class: 'quiet' }, 'Blocked buyers'),
-        s.blocked.map(b => h('button', { type: 'button', class: 'pill', 'data-do': 'reqUnblock', 'data-buyer': b, title: 'Unblock' }, b, ' ×'))) : null),
+        s.blocked.map(b => h('button', { type: 'button', class: 'pill', 'data-do': 'reqUnblock', 'data-buyer': b, title: 'Unblock' }, b, ' ×'))) : null,
+      rulesEditor(s.rules)),
 
     step(5, 'Which ones go out by themselves?', 'Only while Auto offers is Live, and only when the price is sure. A kind needs a price first.',
       h('div', { class: 'autos' }, kinds.map(([name, rule]) => {
@@ -2068,11 +2103,122 @@ function reqSetupPanel() {
       })),
       h('small', { class: 'quiet' }, `${yourKinds(s).join(', ')}: every request is different, so they wait for you on their card.`)),
 
+    step(6, 'Try it before you save', 'Runs what is on this page over your last requests, as if Live were on. Nothing is sent or saved.',
+      h('div', { class: 'try-acts' }, h('button', { type: 'button', class: 'solid', 'data-do': 'reqTry', disabled: !!state.requests.trying }, state.requests.trying ? 'Trying…' : 'Try on recent requests')),
+      trySample(s),
+      state.requests.trialNote ? h('p', { class: 'note bad', role: 'alert' }, state.requests.trialNote) : null,
+      trialView(state.requests.trial)),
+
     h('div', { class: 'setup-bar' },
       h('div', {}, h('b', {}, `Auto on for ${autoOn.length} of ${kinds.length} kinds`), h('small', { class: 'quiet' }, `${ready.length} of ${kinds.length} have a price`)),
       reqSetupError ? h('p', { class: 'note bad', role: 'alert' }, reqSetupError) : null,
       h('div', { class: 'acts' }, h('button', { type: 'button', class: 'line', 'data-do': 'reqSetup' }, 'Cancel'),
         h('button', { type: 'button', class: 'solid', 'data-do': 'reqSave', disabled: state.requests.busy }, 'Save'))));
+}
+
+const num0 = v => (typed(v) && typedNumber(v) !== 0 ? String(v) : '');
+const wordsOf = text => String(text || '').split(',').map(w => w.trim()).filter(Boolean);
+
+// The rules that keep the auto sender off a request. Every one starts off; a skipped request still waits under
+// Skipped, where you can answer it by hand.
+function rulesEditor(r) {
+  const box = (key, label) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', 'data-rules': key, checked: !!r[key] }), label);
+  const field = (key, label, placeholder, mode = 'numeric') => h('label', {}, label, h('input', { 'data-rules': key, value: num0(r[key]), inputmode: mode, placeholder }));
+  return h('div', { class: 'rules' },
+    h('b', {}, 'Skip a request when'),
+    h('div', { class: 'rule-grid' },
+      h('label', {}, 'The buyer wrote any of', h('input', { 'data-rules': 'skipWords', value: r.skipWords, placeholder: 'refund, cheap, discord' })),
+      h('label', {}, 'The buyer wrote none of', h('input', { 'data-rules': 'needWords', value: r.needWords, placeholder: 'Empty: no check' })),
+      field('minAccountDays', 'Buyer account younger than, days', 'Off'),
+      field('minReviews', 'Buyer has fewer reviews than', 'Off'),
+      field('minPositive', 'Buyer less positive than, %', 'Off', 'decimal')),
+    h('div', { class: 'autos' },
+      box('skipSellers', 'The buyer is a verified seller'),
+      box('skipDisputed', 'The buyer has disputed orders'),
+      box('skipRepeat', 'Same buyer, same request within a day'),
+      box('wholeWords', 'Whole words only')),
+    h('small', { class: 'quiet' }, 'Split words with commas. With whole words, “elo” finds “my elo is 900” but not “elometer”. A buyer fact Eldorado does not give is never held against the buyer. Skipped requests wait under Skipped, and you can still answer them by hand.'));
+}
+
+// One request typed in by hand: what it would cost and why.
+function trySample(s) {
+  const names = Object.keys(s.categories).filter(n => n !== 'Raids');
+  const smp = s.sample;
+  const levels = (s.categories[smp.category] || {}).kind === 'levels';
+  return h('div', { class: 'try-sample' },
+    choice({ 'data-sample': 'category', 'aria-label': 'Kind of request' }, names.map(n => [n, n]), smp.category),
+    levels ? [
+      h('input', { class: 'lvl', 'data-sample': 'current', value: smp.current, inputmode: 'numeric', placeholder: 'From level', 'aria-label': 'Current level' }),
+      h('input', { class: 'lvl', 'data-sample': 'desired', value: smp.desired, inputmode: 'numeric', placeholder: 'To level', 'aria-label': 'Desired level' }),
+    ] : null,
+    h('input', { class: 'grow', 'data-sample': 'text', value: smp.text, placeholder: levels ? 'What the buyer wrote (optional)' : 'What the buyer wrote, like 12 Tempest IV', 'aria-label': 'What the buyer wrote' }),
+    h('button', { type: 'button', class: 'line', 'data-do': 'reqTrySample', disabled: !!state.requests.trying }, 'Price it'));
+}
+
+const OUTCOME = { send: ['pill up', 'Would send'], rule: ['pill quiet', 'Rule skips'], you: ['pill warn', 'Waits for you'] };
+
+function trialRow(r, sample) {
+  const [cls, label] = OUTCOME[r.outcome] || OUTCOME.you;
+  return h('div', { class: sample ? 'try-item sample' : 'try-item', 'data-key': 't' + (sample ? 'sample' : r.id) },
+    h('div', { class: 'try-head' },
+      h('b', {}, r.category, r.basis ? h('span', { class: 'quiet' }, ` · ${r.basis}`) : null),
+      h('span', { class: 'grow' }),
+      r.price != null ? h('b', {}, dollars(r.price)) : null,
+      r.delivery ? h('small', { class: 'quiet' }, deliveryLabel(r.delivery)) : null,
+      h('span', { class: cls }, label)),
+    r.text && !sample ? h('small', { class: 'quiet clip' }, `“${r.text}”`) : null,
+    r.why ? h('small', { class: r.outcome === 'rule' ? 'quiet' : 'warn-text' }, r.why) : null,
+    sample && (r.steps || []).length ? howList(r.steps, 'tsteps') : null);
+}
+
+function trialView(t) {
+  if (!t) return null;
+  const c = t.counts || {};
+  const rows = t.rows || [];
+  return h('div', { class: 'try-out' },
+    t.sample ? trialRow(t.sample, true) : null,
+    rows.length ? h('p', { class: 'example' }, `Last ${rows.length} requests: `, h('b', {}, `${c.send || 0} would go out by themselves`),
+      `, ${c.rule || 0} skipped by your rules, ${c.you || 0} wait for you.`) : h('p', { class: 'quiet' }, 'No recent requests to try on yet.'),
+    rows.length ? h('div', { class: 'try-list' }, rows.map(r => trialRow(r))) : null);
+}
+
+// Quick setup as the server takes it, or null with reqSetupError set.
+function setupSettings() {
+  const s = reqSetup;
+  const num = v => typedNumber(v);
+  const categories = {};
+  for (const [name, rule] of Object.entries(s.categories)) {
+    let bands = rule.bands || [];
+    if (rule.ranges) {
+      const rows = rule.ranges.filter(r => String(r.to).trim() !== '' || String(r.total).trim() !== '');
+      bands = [];
+      let from = 1;
+      for (const r of rows) {
+        const to = Math.round(num(r.to));
+        const fail = text => { reqSetupError = `${name}: ${text}`; draw(); return null; };
+        if (!typed(r.to) || to <= from) return fail(`each range has to end above level ${from}.`);
+        if (!typed(r.total) || num(r.total) < 0) return fail(`put a price on levels ${from} → ${to}.`);
+        bands.push({ upTo: to, each: Math.round(num(r.total) / (to - from) * 1e4) / 1e4 });
+        from = to;
+      }
+    }
+    const ok = rule.kind !== 'review' && ruleReady(rule);
+    categories[name] = {
+      auto: !!rule.auto && ok, delivery: rule.delivery || '', perMillion: num(rule.perMillion) || 0, flat: num(rule.flat) || 0,
+      markup: num(rule.markup) || 0, bands,
+    };
+  }
+  const r = s.rules;
+  const whole = v => (typed(v) ? Math.max(0, Math.round(num(v))) : 0);
+  const rules = {
+    skipWords: wordsOf(r.skipWords), needWords: wordsOf(r.needWords), wholeWords: !!r.wholeWords,
+    skipSellers: !!r.skipSellers, skipDisputed: !!r.skipDisputed, skipRepeat: !!r.skipRepeat,
+    minAccountDays: Math.min(3650, whole(r.minAccountDays)), minReviews: whole(r.minReviews),
+    minPositive: typed(r.minPositive) ? Math.min(100, Math.max(0, num(r.minPositive))) : 0,
+    maxPrice: typed(r.maxPrice) ? Math.max(0, num(r.maxPrice)) : 0,
+  };
+  reqSetupError = '';
+  return { delivery: s.delivery, deliveryMode: s.deliveryMode === 'auto' ? 'auto' : 'fixed', message: s.message || '', minPrice: num(s.minPrice) || 0, platforms: s.platforms, categories, rules };
 }
 
 function requestsPage() {
@@ -2132,6 +2278,13 @@ Object.assign(CLICKS, {
       for (const [name, rule] of Object.entries(reqSetup.categories)) if (rule.kind === 'levels') rule.ranges = rangesOf(name, rule.bands);
       reqStandard = standardSheet(reqSetup);
       reqSetup.preset = '';
+      const rules = Object.assign({ wholeWords: true }, reqSetup.rules || {});
+      rules.skipWords = (rules.skipWords || []).join(', ');
+      rules.needWords = (rules.needWords || []).join(', ');
+      reqSetup.rules = rules;
+      const first = pricedKinds(reqSetup)[0];
+      reqSetup.sample = { category: first ? first[0] : Object.keys(reqSetup.categories)[0], text: '', current: '', desired: '' };
+      send('reqTryClear', {});
     }
     draw();
   },
@@ -2149,34 +2302,22 @@ Object.assign(CLICKS, {
     draw();
   },
   reqSave() {
-    const s = reqSetup;
-    const num = v => typedNumber(v);
-    const categories = {};
-    for (const [name, rule] of Object.entries(s.categories)) {
-      let bands = rule.bands || [];
-      if (rule.ranges) {
-        const rows = rule.ranges.filter(r => String(r.to).trim() !== '' || String(r.total).trim() !== '');
-        bands = [];
-        let from = 1;
-        for (const r of rows) {
-          const to = Math.round(num(r.to));
-          const fail = text => { reqSetupError = `${name}: ${text}`; draw(); };
-          if (!typed(r.to) || to <= from) return fail(`each range has to end above level ${from}.`);
-          if (!typed(r.total) || num(r.total) < 0) return fail(`put a price on levels ${from} → ${to}.`);
-          bands.push({ upTo: to, each: Math.round(num(r.total) / (to - from) * 1e4) / 1e4 });
-          from = to;
-        }
-      }
-      const ok = rule.kind !== 'review' && ruleReady(rule);
-      categories[name] = {
-        auto: !!rule.auto && ok, delivery: rule.delivery || '', perMillion: num(rule.perMillion) || 0, flat: num(rule.flat) || 0,
-        markup: num(rule.markup) || 0, bands,
-      };
-    }
-    reqSetupError = '';
-    send('reqSettings', { settings: { delivery: s.delivery, deliveryMode: s.deliveryMode === 'auto' ? 'auto' : 'fixed', message: s.message || '', minPrice: num(s.minPrice) || 0, platforms: s.platforms, categories } });
+    const settings = setupSettings();
+    if (!settings) return;
+    send('reqSettings', { settings });
     reqSetup = null;
     draw();
+  },
+  reqTry() {
+    const settings = setupSettings();
+    if (settings) send('reqTry', { settings });
+  },
+  reqTrySample() {
+    const settings = setupSettings();
+    if (!settings) return;
+    const smp = reqSetup.sample;
+    const levels = (reqSetup.categories[smp.category] || {}).kind === 'levels';
+    send('reqTry', { settings, sample: { category: smp.category, text: smp.text, current: levels ? smp.current : '', desired: levels ? smp.desired : '' } });
   },
   reqRangeAdd(target) {
     const rule = reqSetup.categories[target.dataset.cat];
@@ -2197,6 +2338,11 @@ Object.assign(CLICKS, {
   reqBlock(target) {
     const blocked = reqData().settings.blocked.concat([target.dataset.buyer]);
     send('reqSettings', { settings: { blocked } });
+  },
+  reqHow(target) {
+    const id = target.dataset.id;
+    if (reqHow.has(id)) reqHow.delete(id); else reqHow.add(id);
+    draw();
   },
   reqEdit(target) {
     reqEditing = reqEditing === target.dataset.id ? '' : target.dataset.id;
@@ -2242,6 +2388,14 @@ function reqInput(node) {
       const button = node.closest('.req-edit').querySelector('[data-do=reqSend]');
       if (button) button.disabled = state.requests.busy || !typed(draft.price);
     }
+    return true;
+  }
+  if ((node.dataset.rules || node.dataset.sample) && reqSetup) {
+    const into = node.dataset.rules ? reqSetup.rules : reqSetup.sample;
+    const key = node.dataset.rules || node.dataset.sample;
+    into[key] = node.type === 'checkbox' ? node.checked : node.value;
+    if (node.type !== 'checkbox' && node.tagName !== 'SELECT') editing = node;
+    draw();
     return true;
   }
   if (node.dataset.rule && reqSetup) {
